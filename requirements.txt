@@ -1,0 +1,6 @@
+python-binance
+anthropic
+pandas
+requests
+python-dotenv
+flask
