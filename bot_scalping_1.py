@@ -16,8 +16,6 @@ from binance.exceptions import BinanceAPIException
 import anthropic
 
 # ── Configuração ──────────────────────────────────────────────────────────────
-os.environ['HTTP_PROXY']  = 'socks5h://127.0.0.1:9050'
-os.environ['HTTPS_PROXY'] = 'socks5h://127.0.0.1:9050'
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
@@ -30,23 +28,15 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 WATCH_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
 
 INTERVAL        = Client.KLINE_INTERVAL_1MINUTE
-LOOP_SECONDS    = 180          # ciclo base 3 min (reduz custo 3x vs 60s)
-LOOP_SIGNAL     = 60           # ciclo rapido quando ha sinal tecnico
+LOOP_SECONDS    = 60
 STOP_LOSS_PCT   = 0.005
 TAKE_PROFIT_PCT = 0.010
 TESTNET         = False
 MIN_CONFIDENCE  = 60
 TRADE_PCT       = 0.90
 MIN_USDT        = 10.0
-MIN_VOLUME_24H  = 50_000_000
-SCAN_INTERVAL   = 3
-
-# Controle de custo de API
-SCORE_PARA_IA   = 2            # score minimo para acionar IA (0-4)
-MODEL_HAIKU     = "claude-haiku-4-5-20251001"
-MODEL_SONNET    = "claude-sonnet-4-20250514"
-MAX_CALLS_DIA   = 150          # limite diario de chamadas IA
-_ai_calls       = {"count": 0, "data": ""}
+MIN_VOLUME_24H  = 50_000_000   # volume mínimo 24h em USDT para considerar par
+SCAN_INTERVAL   = 5            # escaneia todos os pares a cada N ciclos
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -251,92 +241,69 @@ def get_indicators_summary(df: pd.DataFrame) -> dict:
     }
 
 
-# ── IA com controle de custo ─────────────────────────────────────────────────
+# ── IA ────────────────────────────────────────────────────────────────────────
 
-def calcular_score(indicators: dict, position) -> tuple:
-    """Calcula score tecnico de compra ou venda (0-4). Retorna (score, tipo)."""
+def ask_claude(symbol: str, indicators: dict, usdt: float, position) -> dict:
+    pos_info = "Sem posição aberta."
+    if position:
+        pct = (indicators["price"] - position["entry_price"]) / position["entry_price"] * 100
+        pos_info = (
+            f"Posição aberta: {position['symbol']} COMPRADO {position['qty']} @ "
+            f"${position['entry_price']:,.4f} | PnL: {pct:+.2f}%"
+        )
+
+    prompt = f"""Especialista em scalping de criptomoedas no mercado Spot Binance.
+
+Par analisado: {symbol} | Timeframe: 1 minuto
+USDT disponível: ${usdt:.2f}
+
+Indicadores:
+- Preço: ${indicators['price']:,.4f}
+- Tendência EMA50: {indicators['trend']}
+- RSI(14): {indicators['rsi']}
+- EMA9/21: {indicators['ema_cross']}
+- MACD hist: {indicators['macd_hist']} ({indicators['macd_signal']})
+- BB: pos={indicators['bb_pct']}%
+- ATR: {indicators['atr']}
+
+Posição: {pos_info}
+
+Regras:
+- BUY: RSI<42, EMA bullish, MACD bullish, BB<40% — só se USDT>$10
+- SELL: RSI>58, EMA bearish, MACD bearish, BB>60% — só se posição aberta
+- WAIT: sinais contraditórios ou sem saldo
+
+JSON apenas:
+{{"action":"BUY"|"SELL"|"WAIT","reason":"1 frase","confidence":0-100}}"""
+
+    try:
+        resp = ai.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = resp.content[0].text.strip().replace("```json","").replace("```","").strip()
+        return json.loads(text)
+    except Exception as e:
+        log.error(f"Erro IA: {e}")
+        return technical_fallback(indicators, usdt, position)
+
+
+def technical_fallback(indicators: dict, usdt: float, position) -> dict:
     rsi  = indicators["rsi"]
     ema  = indicators["ema_cross"]
     macd = indicators["macd_signal"]
     hist = indicators["macd_hist"]
     bb   = indicators["bb_pct"]
 
-    buy_score  = sum([rsi<42, ema in("cruzamento_alta","acima_bullish"), macd=="bullish" and hist>0, bb<40])
-    sell_score = sum([rsi>58, ema in("cruzamento_baixa","abaixo_bearish"), macd=="bearish" and hist<0, bb>60])
+    buy_score  = sum([rsi<38, ema in("cruzamento_alta","acima_bullish"), macd=="bullish" and hist>0, bb<30])
+    sell_score = sum([rsi>62, ema in("cruzamento_baixa","abaixo_bearish"), macd=="bearish" and hist<0, bb>70])
 
-    if position:
-        return sell_score, "SELL"
-    return buy_score, "BUY"
-
-
-def technical_fallback(indicators: dict, usdt: float, position) -> dict:
-    score, tipo = calcular_score(indicators, position)
-    rsi = indicators["rsi"]
-    bb  = indicators["bb_pct"]
-
-    if tipo == "SELL" and score >= 3 and position:
-        return {"action":"SELL","reason":f"[FB] RSI={rsi} BB={bb}%","confidence":score*20}
-    if tipo == "BUY" and score >= 3 and usdt >= MIN_USDT:
-        return {"action":"BUY","reason":f"[FB] RSI={rsi} BB={bb}%","confidence":score*20}
-    return {"action":"WAIT","reason":f"[FB] score={score}/4","confidence":0}
-
-
-def ask_claude(symbol: str, indicators: dict, usdt: float, position) -> dict:
-    """Chama a IA somente quando o score tecnico justifica. Economiza ~90% de tokens."""
-    global _ai_calls
-
-    # Reseta contador diario
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    if _ai_calls["data"] != hoje:
-        _ai_calls = {"count": 0, "data": hoje}
-        log.info(f"[ECON] Novo dia — contador de chamadas IA resetado.")
-
-    # Calcula score tecnico primeiro (sem custo)
-    score, tipo = calcular_score(indicators, position)
-
-    # Se score baixo, usa fallback direto (sem chamar IA)
-    if score < SCORE_PARA_IA:
-        log.info(f"[ECON] Score={score}/4 < {SCORE_PARA_IA} — fallback tecnico (0 tokens)")
-        return technical_fallback(indicators, usdt, position)
-
-    # Verifica limite diario
-    if _ai_calls["count"] >= MAX_CALLS_DIA:
-        log.warning(f"[ECON] Limite diario atingido ({MAX_CALLS_DIA}). Fallback tecnico.")
-        return technical_fallback(indicators, usdt, position)
-
-    # Score suficiente — chama IA
-    pos_info = "sem posicao"
-    if position:
-        pct = (indicators["price"] - position["entry_price"]) / position["entry_price"] * 100
-        pos_info = f"comprado@${position['entry_price']:,.2f} PnL:{pct:+.1f}%"
-
-    # Prompt ultra-compacto para minimizar tokens de entrada
-    prompt = (
-        f"Scalping {symbol} 1min. "
-        f"RSI:{indicators['rsi']} EMA:{indicators['ema_cross'][:3]} "
-        f"MACD:{indicators['macd_signal'][:4]}({indicators['macd_hist']:+.5f}) "
-        f"BB:{indicators['bb_pct']}% ATR:{indicators['atr']:.2f} "
-        f"USDT:{usdt:.0f} {pos_info}. "
-        f"Score_{tipo}:{score}/4. "
-        'Responda JSON: {"action":"BUY|SELL|WAIT","reason":"max 8 palavras","confidence":0-100}'
-    )
-
-    # Score 2 = Haiku (barato ~$0,00025), score 3-4 = Sonnet (preciso ~$0,003)
-    model = MODEL_SONNET if score >= 3 else MODEL_HAIKU
-
-    try:
-        resp = ai.messages.create(
-            model=model, max_tokens=60,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        _ai_calls["count"] += 1
-        custo_est = 0.00025 if model == MODEL_HAIKU else 0.003
-        log.info(f"[ECON] IA={model.split('-')[1]} score={score} #dia={_ai_calls['count']} ~${custo_est:.5f}")
-        text = resp.content[0].text.strip().replace("```json","").replace("```","").strip()
-        return json.loads(text)
-    except Exception as e:
-        log.error(f"Erro IA: {e}")
-        return technical_fallback(indicators, usdt, position)
+    if position and sell_score >= 3:
+        return {"action":"SELL","reason":f"[FB] RSI={rsi} BB={bb}%","confidence":sell_score*20}
+    if not position and buy_score >= 3 and usdt >= MIN_USDT:
+        return {"action":"BUY","reason":f"[FB] RSI={rsi} BB={bb}%","confidence":buy_score*20}
+    return {"action":"WAIT","reason":f"[FB] buy={buy_score} sell={sell_score}","confidence":0}
 
 
 # ── Ordens ────────────────────────────────────────────────────────────────────
@@ -472,21 +439,29 @@ def run():
             if state["position"]:
                 check_exit(price)
 
-            # Calcula score tecnico para definir intervalo e se aciona IA
-            score_pre, tipo_pre = calcular_score(indicators, state["position"])
+            # IA ou fallback
+            usar_fallback = ai_failures >= MAX_FAILURES
+            decision = technical_fallback(indicators, usdt, state["position"]) if usar_fallback \
+                       else ask_claude(symbol, indicators, usdt, state["position"])
 
-            # Executa decisao (IA so e chamada se score >= SCORE_PARA_IA)
-            decision = ask_claude(symbol, indicators, usdt, state["position"])
             action = decision.get("action", "WAIT")
             reason = decision.get("reason", "")
             conf   = decision.get("confidence", 0)
 
-            log.info(f"[{symbol}] → {action} ({conf}%) | {reason}")
+            if "Erro" in reason:
+                ai_failures += 1
+                if ai_failures == MAX_FAILURES:
+                    notify("⚠️ IA indisponível. Usando fallback técnico.")
+            elif "[FB]" not in reason:
+                ai_failures = 0
 
-            # ── Executa decisao ─────────────────────────────────────────────
+            modo = "📊 FB" if usar_fallback else "🤖 IA"
+            log.info(f"{modo} [{symbol}] → {action} ({conf}%) | {reason}")
+
+            # ── Executa decisão ──────────────────────────────────────────────
             if action == "BUY" and conf >= MIN_CONFIDENCE:
                 if state["position"]:
-                    log.info("Ja ha posicao aberta.")
+                    log.info("Já há posição aberta — aguardando fechar.")
                 elif usdt >= MIN_USDT:
                     open_buy(symbol, price, reason, usdt)
                 else:
@@ -496,15 +471,12 @@ def run():
                 if state["position"]:
                     close_position(price, reason)
                 else:
-                    log.info("SELL: sem posicao aberta.")
+                    log.info("SELL: sem posição aberta para fechar.")
 
             else:
-                log.info("Aguardando...")
+                log.info("Aguardando melhor oportunidade...")
 
-            # Intervalo adaptativo: 60s se ha sinal, 180s se mercado parado
-            sleep_time = LOOP_SIGNAL if score_pre >= SCORE_PARA_IA or state["position"] else LOOP_SECONDS
-            log.info(f"[ECON] proximo ciclo em {sleep_time}s (score={score_pre}/4)")
-            time.sleep(sleep_time)
+            time.sleep(LOOP_SECONDS)
 
         except KeyboardInterrupt:
             notify("⛔ Bot encerrado pelo usuário.")
