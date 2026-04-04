@@ -773,20 +773,20 @@ def parse_bot_log(log_file: str, bot_name: str, bot_idx: int = 0) -> dict:
     return result
 
 
-def get_all_bots():
+def get_all_bots(bot_filter: int = 0):
+    """Retorna todos os bots ou apenas um se bot_filter > 0."""
     bots = []
     bot_count = int(os.getenv("BOT_COUNT","1"))
-    for i in range(bot_count):
+    indices = [bot_filter - 1] if bot_filter > 0 else range(bot_count)
+    for i in indices:
         prefix = f"BOT_{i+1}"
         name   = os.getenv(f"{prefix}_NAME", f"Bot {i+1}")
         slug   = name.lower().replace(" ","_")
-        # Tenta vários nomes possíveis de log
         candidatos = [
             os.path.join(BASE, f"bot_{slug}.log"),
             os.path.join(BASE, f"bot.log"),
             os.path.join(BASE, f"{slug}.log"),
         ]
-        # Também busca qualquer .log que contenha o nome
         for f in sorted(glob.glob(os.path.join(BASE, "*.log"))):
             if slug in os.path.basename(f).lower() and f not in candidatos:
                 candidatos.insert(0, f)
@@ -797,17 +797,20 @@ def get_all_bots():
     return bots
 
 
+# Índice do bot que esta instância mostra (0 = todos)
+BOT_FILTER = 0
+
 @app.route("/")
 def index():
     return render_template_string(HTML)
 
 @app.route("/api/bots")
 def api_bots():
-    return jsonify(get_all_bots())
+    return jsonify(get_all_bots(BOT_FILTER))
 
 @app.route("/api/status")
 def api_status():
-    bots = get_all_bots()
+    bots = get_all_bots(BOT_FILTER)
     return jsonify(bots[0] if bots else {})
 
 @app.route("/api/notif/<int:idx>", methods=["POST"])
@@ -836,13 +839,16 @@ def save_tg_ativo(idx):
 
 if __name__ == "__main__":
     import argparse
+    global BOT_FILTER
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=5000, help="Porta do dashboard (padrão: 5000)")
-    parser.add_argument("--bot", type=int, default=0, help="Índice do bot (0=todos, 1=bot1, 2=bot2...)")
+    parser.add_argument("--port", type=int, default=5000, help="Porta (padrão: 5000)")
+    parser.add_argument("--bot",  type=int, default=0,    help="Bot a exibir: 0=todos, 1=bot1, 2=bot2...")
     args = parser.parse_args()
+    BOT_FILTER = args.bot
 
+    nome = f"Bot {args.bot}" if args.bot else "Todos os Bots"
     print("="*50)
-    print(f" ScalpBot Dashboard — Bot {args.bot if args.bot else 'Todos'}")
+    print(f" ScalpBot Dashboard — {nome}")
     print(f" Acesse: http://localhost:{args.port}")
     print("="*50)
     app.run(host="0.0.0.0", port=args.port, debug=False)
