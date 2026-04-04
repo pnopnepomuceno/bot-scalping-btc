@@ -806,11 +806,11 @@ def index():
 
 @app.route("/api/bots")
 def api_bots():
-    return jsonify(get_all_bots(BOT_FILTER))
+    return jsonify(get_all_bots(app.config.get("BOT_FILTER", 0)))
 
 @app.route("/api/status")
 def api_status():
-    bots = get_all_bots(BOT_FILTER)
+    bots = get_all_bots(app.config.get("BOT_FILTER", 0))
     return jsonify(bots[0] if bots else {})
 
 @app.route("/api/notif/<int:idx>", methods=["POST"])
@@ -839,12 +839,11 @@ def save_tg_ativo(idx):
 
 if __name__ == "__main__":
     import argparse
-    global BOT_FILTER
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=5000, help="Porta (padrão: 5000)")
     parser.add_argument("--bot",  type=int, default=0,    help="Bot a exibir: 0=todos, 1=bot1, 2=bot2...")
     args = parser.parse_args()
-    BOT_FILTER = args.bot
+    app.config["BOT_FILTER"] = args.bot
 
     nome = f"Bot {args.bot}" if args.bot else "Todos os Bots"
     print("="*50)
