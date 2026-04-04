@@ -16,8 +16,6 @@ from binance.exceptions import BinanceAPIException
 import anthropic
 
 # ── Configuração ──────────────────────────────────────────────────────────────
-os.environ['HTTP_PROXY']  = 'socks5h://127.0.0.1:9050'
-os.environ['HTTPS_PROXY'] = 'socks5h://127.0.0.1:9050'
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
@@ -63,8 +61,13 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Clientes ──────────────────────────────────────────────────────────────────
-client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-ai     = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+#client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+#ai     = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+import requests
+proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
+session = requests.Session()
+session.proxies.update(proxies)
+client = Client(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={"proxies": proxies})
 
 # ── Estado ────────────────────────────────────────────────────────────────────
 state = {
