@@ -148,7 +148,7 @@ tr:last-child td{border:none}tr:hover td{background:var(--s2)}
 .sn{font-family:var(--mono);font-size:10px;text-align:right}
 
 /* Log */
-.lw{height:190px;overflow-y:auto;font-family:var(--mono);font-size:9px;display:flex;flex-direction:column;gap:2px}
+.lw{height:220px;overflow-y:auto;font-family:var(--mono);font-size:10px;display:flex;flex-direction:column;gap:1px;padding:4px}
 .ll{line-height:1.7;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ll.buy{color:var(--green)}.ll.sell{color:var(--red)}.ll.warn{color:var(--amber)}
 .ll.err{color:var(--red);opacity:.7}.ll.ia{color:var(--accent)}.ll.scan{color:var(--purple)}
@@ -779,9 +779,18 @@ def get_all_bots():
     for i in range(bot_count):
         prefix = f"BOT_{i+1}"
         name   = os.getenv(f"{prefix}_NAME", f"Bot {i+1}")
-        log_file = os.path.join(BASE, f"bot_{name.lower().replace(' ','_')}.log")
-        if not os.path.exists(log_file):
-            log_file = os.path.join(BASE, "bot.log")
+        slug   = name.lower().replace(" ","_")
+        # Tenta vários nomes possíveis de log
+        candidatos = [
+            os.path.join(BASE, f"bot_{slug}.log"),
+            os.path.join(BASE, f"bot.log"),
+            os.path.join(BASE, f"{slug}.log"),
+        ]
+        # Também busca qualquer .log que contenha o nome
+        for f in sorted(glob.glob(os.path.join(BASE, "*.log"))):
+            if slug in os.path.basename(f).lower() and f not in candidatos:
+                candidatos.insert(0, f)
+        log_file = next((f for f in candidatos if os.path.exists(f)), candidatos[-1])
         bots.append(parse_bot_log(log_file, name, i))
     if not bots:
         bots.append(parse_bot_log(os.path.join(BASE,"bot.log"),"Principal",0))
@@ -803,22 +812,27 @@ def api_status():
 
 @app.route("/api/notif/<int:idx>", methods=["POST"])
 def save_notif(idx):
-    cfg = request.get_json()
-    prefix = f"BOT_{idx+1}"
-    for key, val in cfg.items():
-        env_key = f"{prefix}_NOTIFY_{key.upper()}"
-        set_key(ENV, env_key, "true" if val else "false")
-    load_dotenv(dotenv_path=ENV, override=True)
-    return jsonify({"ok": True})
+    try:
+        cfg = request.get_json()
+        prefix = f"BOT_{idx+1}"
+        for key, val in cfg.items():
+            env_key = f"{prefix}_NOTIFY_{key.upper()}"
+            set_key(ENV, env_key, "true" if val else "false")
+        load_dotenv(dotenv_path=ENV, override=True)
+        return jsonify({"ok": True, "msg": "Salvo com sucesso!"})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
 @app.route("/api/tg_ativo/<int:idx>", methods=["POST"])
 def save_tg_ativo(idx):
-    """Liga/desliga Telegram de um bot"""
-    cfg = request.get_json()
-    prefix = f"BOT_{idx+1}"
-    set_key(ENV, f"{prefix}_TELEGRAM_ATIVO", "true" if cfg.get("ativo") else "false")
-    load_dotenv(dotenv_path=ENV, override=True)
-    return jsonify({"ok": True})
+    try:
+        cfg = request.get_json()
+        prefix = f"BOT_{idx+1}"
+        set_key(ENV, f"{prefix}_TELEGRAM_ATIVO", "true" if cfg.get("ativo") else "false")
+        load_dotenv(dotenv_path=ENV, override=True)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
 if __name__ == "__main__":
     import argparse
