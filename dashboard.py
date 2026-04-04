@@ -278,6 +278,16 @@ function buildNotifPanel(b, idx){
   </div>`;
 }
 
+async function saveTgAtivo(idx){
+  const ativo=document.getElementById(`tg-ativo-${idx}`)?.checked;
+  await fetch(`/api/tg_ativo/${idx}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ativo})});
+  // Desabilita/habilita grid de notificações
+  const grid=document.getElementById(`notif-grid-${idx}`);
+  if(grid) grid.style.opacity=ativo?'1':'0.4';
+  const msg=document.getElementById(`sv-${idx}`);
+  if(msg){msg.textContent=ativo?'✓ Telegram ativado!':'✓ Telegram desativado!';msg.style.display='inline';setTimeout(()=>msg.style.display='none',2000);}
+}
+
 async function saveNotif(idx){
   const b=bots[idx];if(!b)return;
   const cfg={};
@@ -562,6 +572,10 @@ function updatePanel(d,idx){
   }
 
   // Notificações estado
+  const tgAtivo=document.getElementById(`tg-ativo-${idx}`);
+  if(tgAtivo) tgAtivo.checked=d.tg_ativo!==false;
+  const grid=document.getElementById(`notif-grid-${idx}`);
+  if(grid) grid.style.opacity=d.tg_ativo!==false?'1':'0.4';
   if(d.notif_cfg){
     Object.keys(NOTIF_TYPES).forEach(key=>{
       const el=document.getElementById(`notif-${idx}-${key}`);
@@ -569,7 +583,7 @@ function updatePanel(d,idx){
     });
   }
   const tgs=document.getElementById(`tg-st-${idx}`);
-  if(tgs)tgs.textContent=d.tg_token?'✓ Telegram configurado':'✗ Sem token Telegram';
+  if(tgs)tgs.textContent=d.tg_token?(d.tg_ativo!==false?'✓ Telegram ativo':'⏸ Telegram pausado'):'✗ Sem token';
 }
 
 async function refresh(){
@@ -789,7 +803,6 @@ def api_status():
 
 @app.route("/api/notif/<int:idx>", methods=["POST"])
 def save_notif(idx):
-    """Salva configuração de notificações de um bot no .env"""
     cfg = request.get_json()
     prefix = f"BOT_{idx+1}"
     for key, val in cfg.items():
@@ -798,9 +811,24 @@ def save_notif(idx):
     load_dotenv(dotenv_path=ENV, override=True)
     return jsonify({"ok": True})
 
+@app.route("/api/tg_ativo/<int:idx>", methods=["POST"])
+def save_tg_ativo(idx):
+    """Liga/desliga Telegram de um bot"""
+    cfg = request.get_json()
+    prefix = f"BOT_{idx+1}"
+    set_key(ENV, f"{prefix}_TELEGRAM_ATIVO", "true" if cfg.get("ativo") else "false")
+    load_dotenv(dotenv_path=ENV, override=True)
+    return jsonify({"ok": True})
+
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=5000, help="Porta do dashboard (padrão: 5000)")
+    parser.add_argument("--bot", type=int, default=0, help="Índice do bot (0=todos, 1=bot1, 2=bot2...)")
+    args = parser.parse_args()
+
     print("="*50)
-    print(" ScalpBot Dashboard Multi-Conta")
-    print(" Acesse: http://localhost:5000")
+    print(f" ScalpBot Dashboard — Bot {args.bot if args.bot else 'Todos'}")
+    print(f" Acesse: http://localhost:{args.port}")
     print("="*50)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=args.port, debug=False)

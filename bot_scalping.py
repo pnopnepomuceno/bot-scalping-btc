@@ -1,28 +1,6 @@
 """
 ScalpBot Multi-Conta — Binance Spot + IA (Claude)
 Suporta múltiplas contas Binance com estratégias independentes.
-
-Configuração via .env:
-  BOT_1_NAME=Conta Principal
-  BOT_1_BINANCE_KEY=...
-  BOT_1_BINANCE_SECRET=...
-  BOT_1_ANTHROPIC_KEY=...
-  BOT_1_TELEGRAM_TOKEN=...
-  BOT_1_TELEGRAM_CHAT=...
-  BOT_1_PAIRS=BTCUSDT,ETHUSDT
-  BOT_1_TRADE_PCT=0.90
-  BOT_1_STOP_LOSS=0.005
-  BOT_1_TAKE_PROFIT=0.010
-  BOT_1_MIN_CONFIDENCE=60
-  BOT_1_SCORE_PARA_IA=2
-  BOT_1_LOOP_SECONDS=180
-  BOT_1_TESTNET=false
-
-  BOT_2_NAME=Conta Agressiva
-  BOT_2_BINANCE_KEY=...
-  ... (mesmas chaves com prefixo BOT_2_)
-
-  BOT_COUNT=2  (quantas contas rodar)
 """
 
 import os, time, logging, json, threading
@@ -255,6 +233,8 @@ class ScalpBot:
         self.notify_cfg  = {k: cfg.get(v, True) for k,v in NOTIFY_TYPES.items()}
         # Cor/emoji do bot para identificação no Telegram
         self.bot_emoji   = cfg.get("emoji", "🤖")
+        # Liga/desliga Telegram desta conta
+        self.tg_ativo    = cfg.get("telegram_ativo", True)
 
         log_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
@@ -274,6 +254,9 @@ class ScalpBot:
 
     def notify(self, msg: str, tipo: str = None):
         self.log.info(msg)
+        # Verifica se Telegram está ativado para esta conta
+        if not self.tg_ativo:
+            return
         # Verifica se este tipo de notificação está ativado
         if tipo and not self.notify_cfg.get(tipo, True):
             return
@@ -468,6 +451,8 @@ def load_bot_config(prefix: str) -> dict:
         "notify_par_troca":   g("NOTIFY_PAR_TROCA","false").lower()=="true",
         "notify_ia_erro":     g("NOTIFY_IA_ERRO","false").lower()=="true",
         "notify_resumo":      g("NOTIFY_RESUMO","true").lower()=="true",
+        # Liga/desliga Telegram desta conta
+        "telegram_ativo":     g("TELEGRAM_ATIVO","true").lower()=="true",
     }
 
 
