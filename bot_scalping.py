@@ -3,7 +3,7 @@ ScalpBot Multi-Conta — Binance Spot + IA (Claude)
 Suporta múltiplas contas Binance com estratégias independentes.
 """
 
-import os, time, logging, json, threading
+import os, time, logging, json, threading, subprocess
 from datetime import datetime
 from dotenv import load_dotenv
 import pandas as pd
@@ -11,7 +11,7 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import anthropic
 
-# Proxy Tor — necessário para VPS nos EUA (contorna bloqueio Binance)
+# Proxy Tor — contorna bloqueio Binance em VPS nos EUA
 os.environ['HTTP_PROXY']  = 'socks5h://127.0.0.1:9050'
 os.environ['HTTPS_PROXY'] = 'socks5h://127.0.0.1:9050'
 
@@ -245,8 +245,9 @@ class ScalpBot:
             f"bot_{self.name.lower().replace(' ','_')}.log"
         )
         self.log = setup_logger(self.name, log_file)
-
-        self.binance = Client(cfg["binance_key"], cfg["binance_secret"])
+        self._binance_key    = cfg["binance_key"]
+        self._binance_secret = cfg["binance_secret"]
+        self.binance = self._conectar_binance()
         self.ai      = anthropic.Anthropic(api_key=cfg["anthropic_key"])
 
         self.state = {
@@ -256,35 +257,29 @@ class ScalpBot:
         self.ai_calls = {"count": 0, "data": ""}
         self.cycle    = 0
 
-    def _criar_client_binance(self, tentativas: int = 5) -> Client:
-        """Cria cliente Binance via proxy Tor, rotacionando nó se bloqueado."""
-        import subprocess, time as t
+    def _conectar_binance(self, max_tentativas: int = 8) -> Client:
+        """Conecta à Binance via Tor, trocando nó automaticamente se bloqueado."""
         proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
-        for i in range(tentativas):
+        for tentativa in range(1, max_tentativas + 1):
             try:
-                client = Client(self.binance_key, self.binance_secret,
-                                requests_params={"proxies": proxies})
-                self.log.info(f"[TOR] Conexão Binance estabelecida (tentativa {i+1})")
+                client = Client(
+                    self._binance_key, self._binance_secret,
+                    requests_params={"proxies": proxies}
+                )
+                self.log.info(f"[TOR] Binance conectada (tentativa {tentativa})")
                 return client
             except Exception as e:
-                err = str(e)
-                if "restricted location" in err or "403" in err:
-                    self.log.warning(f"[TOR] Nó bloqueado (tentativa {i+1}/{tentativas}) — trocando nó...")
+                if "restricted location" in str(e) or "403" in str(e) or "cloudfront" in str(e).lower():
+                    self.log.warning(f"[TOR] Nó bloqueado ({tentativa}/{max_tentativas}) — trocando nó...")
                     try:
-                        subprocess.run(["sudo", "systemctl", "restart", "tor"], timeout=10)
-                        t.sleep(15)
-                    except Exception as se:
-                        self.log.warning(f"[TOR] Erro ao reiniciar Tor: {se}")
-                        t.sleep(5)
+                        subprocess.run(["sudo", "systemctl", "restart", "tor"],
+                                       timeout=10, capture_output=True)
+                        time.sleep(20)
+                    except Exception:
+                        time.sleep(10)
                 else:
-                    self.log.error(f"[BINANCE] Erro inesperado: {e}")
                     raise
-        raise Exception(f"[TOR] Binance bloqueou todos os {tentativas} nós Tor. Tente mais tarde.")
-
-    def _reconectar_binance(self):
-        """Reconecta ao Binance trocando nó Tor."""
-        self.log.warning("[TOR] Reconectando à Binance...")
-        self.binance = self._criar_client_binance()
+        raise ConnectionError(f"[TOR] Binance bloqueou {max_tentativas} nós. VPS precisa ser migrada para Europa.")
 
     def notify(self, msg: str, tipo: str = None):
         self.log.info(msg)
@@ -450,10 +445,11 @@ class ScalpBot:
                 break
             except Exception as e:
                 err = str(e)
-                if "restricted location" in err or "403" in err:
-                    self.log.warning("[TOR] Bloqueio detectado no loop — reconectando...")
+                if "restricted location" in err or "cloudfront" in err.lower() or "403" in err:
+                    self.log.warning("[TOR] Bloqueio no loop — reconectando...")
                     try:
-                        self._reconectar_binance()
+                        self.binance = self._conectar_binance()
+                        self.log.info("[TOR] Reconectado com sucesso!")
                     except Exception as re:
                         self.log.error(f"[TOR] Falha ao reconectar: {re}")
                         time.sleep(30)
@@ -506,8 +502,8 @@ if __name__ == "__main__":
     for i in range(1, bot_count + 1):
         prefix = f"BOT_{i}"
         cfg    = load_bot_config(prefix)
-        if not cfg["binance_key"]:
-            print(f"[AVISO] {prefix} sem chave Binance — pulando.")
+        if not cfg["binance_key"] or not cfg["binance_key"].strip():
+            print(f"[AVISO] {prefix} sem chave Binance — verifique o .env")
             continue
         bot = ScalpBot(cfg)
         t   = threading.Thread(target=bot.run, name=f"bot-{i}", daemon=True)
@@ -515,10 +511,6 @@ if __name__ == "__main__":
         t.start()
         print(f"[OK] Bot {i} '{cfg['name']}' iniciado em thread separada.")
         time.sleep(2)
-
-    if not threads:
-        print("[ERRO] Nenhum bot iniciado. Verifique as chaves no .env")
-        exit(1)
 
     try:
         while True:
