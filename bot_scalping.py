@@ -246,7 +246,8 @@ class ScalpBot:
         )
         self.log = setup_logger(self.name, log_file)
 
-        self.binance = Client(cfg["binance_key"], cfg["binance_secret"])
+    proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
+    self.binance = Client(cfg["binance_key"], cfg["binance_secret"], requests_params={"proxies": proxies})
         self.ai      = anthropic.Anthropic(api_key=cfg["anthropic_key"])
 
         self.state = {
