@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 venv/
 *.log
+bot_scalping_orig.py
+dashboard_orig.py
+.env_orig
