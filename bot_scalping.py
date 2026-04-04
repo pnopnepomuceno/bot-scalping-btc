@@ -11,6 +11,10 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import anthropic
 
+# Proxy Tor — necessário para VPS nos EUA (contorna bloqueio Binance)
+os.environ['HTTP_PROXY']  = 'socks5h://127.0.0.1:9050'
+os.environ['HTTPS_PROXY'] = 'socks5h://127.0.0.1:9050'
+
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 # ── Utilitários ───────────────────────────────────────────────────────────────
@@ -472,6 +476,10 @@ if __name__ == "__main__":
         t.start()
         print(f"[OK] Bot {i} '{cfg['name']}' iniciado em thread separada.")
         time.sleep(2)
+
+    if not threads:
+        print("[ERRO] Nenhum bot iniciado. Verifique as chaves no .env")
+        exit(1)
 
     try:
         while True:
