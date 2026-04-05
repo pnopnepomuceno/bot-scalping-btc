@@ -149,9 +149,9 @@ tr:last-child td{border:none}tr:hover td{background:var(--s2)}
 
 /* Log */
 .lw{height:220px;overflow-y:auto;font-family:var(--mono);font-size:10px;display:flex;flex-direction:column;gap:1px;padding:4px}
-.ll{line-height:1.7;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ll.buy{color:var(--green)}.ll.sell{color:var(--red)}.ll.warn{color:var(--amber)}
-.ll.err{color:var(--red);opacity:.7}.ll.ia{color:var(--accent)}.ll.scan{color:var(--purple)}
+.ll{line-height:1.6;color:#7a8faa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px}
+.ll.buy{color:#00e87a !important}.ll.sell{color:#ff6b6b !important}.ll.warn{color:#ffb347 !important}
+.ll.err{color:#ff4757 !important}.ll.ia{color:#5bc8ff !important}.ll.scan{color:#bf99ff !important}
 
 /* Notificações */
 .notif-panel{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:16px}
@@ -557,18 +557,20 @@ function updatePanel(d,idx){
 
   // Log
   const lwe=document.getElementById(`lw-${idx}`);
-  if(lwe&&d.logs){
+  if(lwe&&d.logs&&d.logs.length>0){
     const lce=document.getElementById(`lc-${idx}`);if(lce)lce.textContent=d.logs.length+' linhas';
-    lwe.innerHTML=d.logs.slice(-80).reverse().map(l=>{
+    const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    lwe.innerHTML=d.logs.slice(-100).reverse().map(l=>{
       let c='ll';
-      if(l.includes('Comprado')||l.includes('📈'))c+=' buy';
-      else if(l.includes('Fechado')||l.includes('✅')||l.includes('❌'))c+=' sell';
-      else if(l.includes('Scanner')||l.includes('★'))c+=' scan';
-      else if(l.includes('IA ')||l.includes('🤖'))c+=' ia';
-      else if(l.includes('WARNING')||l.includes('⚠️')||l.includes('ECON')||l.includes('FB'))c+=' warn';
-      else if(l.includes('ERROR')||l.includes('Erro'))c+=' err';
-      return`<div class="${c}">${l}</div>`;
+      if(l.includes('Comprado'))c+=' buy';
+      else if(l.includes('Fechado')||l.includes('PnL:'))c+=' sell';
+      else if(l.includes('Scanner')||l.includes('Melhor:'))c+=' scan';
+      else if(l.includes('[IA]')||l.includes('[ECON]')||l.includes('[TOR]'))c+=' ia';
+      else if(l.includes('WARNING')||l.includes('[FB]'))c+=' warn';
+      else if(l.includes('ERROR')||l.includes('[ERRO]'))c+=' err';
+      return`<div class="${c}">${esc(l)}</div>`;
     }).join('');
+    lwe.scrollTop=0;
   }
 
   // Notificações estado
@@ -583,7 +585,11 @@ function updatePanel(d,idx){
     });
   }
   const tgs=document.getElementById(`tg-st-${idx}`);
-  if(tgs)tgs.textContent=d.tg_token?(d.tg_ativo!==false?'✓ Telegram ativo':'⏸ Telegram pausado'):'✗ Sem token';
+  if(tgs){
+    const exch=(d.exchange||'binance').toUpperCase();
+    const tgSt=d.tg_token?(d.tg_ativo!==false?'✓ Telegram ativo':'⏸ Telegram pausado'):'✗ Sem token';
+    tgs.textContent=`${exch} | ${tgSt}`;
+  }
 }
 
 async function refresh(){
@@ -599,8 +605,11 @@ async function refresh(){
         const tab=document.createElement('div');
         tab.className='tab'+(i===0?' on':'');
         tab.id=`tab-${i}`;
+        const exchLabel = b.exchange==='okx'
+          ? '<span class="badge-testnet" style="background:rgba(255,165,2,.15);color:#ffa502;border-color:rgba(255,165,2,.3)">OKX</span>'
+          : '<span class="badge-testnet" style="background:rgba(240,185,11,.1);color:#f0b90b;border-color:rgba(240,185,11,.3)">BNB</span>';
         tab.innerHTML=`<div class="dot ${b.bot_running?'on':''}"></div>
-          ${b.emoji||'🤖'} ${b.name}
+          ${b.emoji||'🤖'} ${b.name} ${exchLabel}
           ${b.testnet?'<span class="badge-testnet">SIM</span>':''}`;
         tab.style.setProperty('--accent',T.accent);
         tab.onclick=()=>{
@@ -670,7 +679,7 @@ setInterval(refresh,5000);setInterval(refreshTicker,10000);
 def parse_bot_log(log_file: str, bot_name: str, bot_idx: int = 0) -> dict:
     result = {
         "name": bot_name, "emoji": "🤖", "bot_running": False,
-        "testnet": False, "tg_token": False,
+        "exchange": "binance", "testnet": False, "tg_token": False, "tg_ativo": True,
         "active_symbol": None, "price": None, "rsi": None,
         "macd_signal": None, "bb_pct": None, "usdt": None,
         "pnl": 0.0, "wins": 0, "losses": 0, "stop_loss": 0.005, "take_profit": 0.010,
@@ -682,8 +691,10 @@ def parse_bot_log(log_file: str, bot_name: str, bot_idx: int = 0) -> dict:
     # Lê config do .env para este bot
     prefix = f"BOT_{bot_idx+1}"
     result["emoji"]       = os.getenv(f"{prefix}_EMOJI", "🤖")
+    result["exchange"]    = os.getenv(f"{prefix}_EXCHANGE", "binance").lower()
     result["testnet"]     = os.getenv(f"{prefix}_TESTNET","false").lower()=="true"
     result["tg_token"]    = bool(os.getenv(f"{prefix}_TELEGRAM_TOKEN",""))
+    result["tg_ativo"]    = os.getenv(f"{prefix}_TELEGRAM_ATIVO","true").lower()=="true"
     result["stop_loss"]   = float(os.getenv(f"{prefix}_STOP_LOSS","0.005"))
     result["take_profit"] = float(os.getenv(f"{prefix}_TAKE_PROFIT","0.010"))
 
@@ -708,13 +719,14 @@ def parse_bot_log(log_file: str, bot_name: str, bot_idx: int = 0) -> dict:
             result["bot_running"] = (datetime.now() - last_dt).total_seconds() < 300
         except: pass
 
-    re_price = re.compile(r'\[(\w+)\] \$([\d,.]+) \| RSI:([\d.]+) \| Tend:(\w+) \| MACD:(\w+) \| BB:([-\d.]+)% \| USDT:([\d.]+)')
+    # Regex compatível com Binance (BTCUSDT) e OKX (BTC-USDT)
+    re_price = re.compile(r'\[([\w-]+)\] \$([\d,.]+) \| RSI:([\d.]+) \| Tend:(\w+) \| MACD:(\w+) \| BB:([-\d.]+)% \| USDT:([\d.]+)')
     re_wl    = re.compile(r'W:(\d+) L:(\d+)')
     re_pnl   = re.compile(r'Total: \$([-+]?[\d.]+)')
-    re_close = re.compile(r'Fechado (\w+) \(([^)]+)\).*PnL: \$([-+]?[\d.]+)')
-    re_open  = re.compile(r'Comprado ([\d.]+) (\w+) @ \$([\d,.]+) \(\$([\d,.]+) USDT\)')
-    re_scan  = re.compile(r'[★ ] (\w+)\s+\| Score:\s*([\d.]+) \| Vol:\s*([\d.]+)M \| Var:([-+\d.]+)% \| Volat:([\d.]+)%')
-    re_best  = re.compile(r'Melhor: (\w+)|Melhor par selecionado: (\w+)')
+    re_close = re.compile(r'Fechado ([\w-]+) \(([^)]+)\).*PnL: \$([-+]?[\d.]+)')
+    re_open  = re.compile(r'Comprado ([\d.]+) ([\w-]+) @ \$([\d,.]+) \(\$([\d,.]+)\)')
+    re_scan  = re.compile(r'[★ ] ([\w-]+)\s+\| Score:\s*([\d.]+) \| Vol:\s*([\d.]+)M \| Var:([-+\d.]+)% \| Volat:([\d.]+)%')
+    re_best  = re.compile(r'Melhor: ([\w-]+)|Melhor par selecionado: ([\w-]+)')
     re_scan_t = re.compile(r'── Scanner')
 
     current_entry = current_sym = current_qty = current_usdt = None
@@ -783,6 +795,7 @@ def get_all_bots(bot_filter: int = 0):
         name   = os.getenv(f"{prefix}_NAME", f"Bot {i+1}")
         slug   = name.lower().replace(" ","_")
         candidatos = [
+            os.path.join(BASE, f"bot_bot_{slug}.log"),  # nome gerado pelo bot (bot_ + slug)
             os.path.join(BASE, f"bot_{slug}.log"),
             os.path.join(BASE, f"bot.log"),
             os.path.join(BASE, f"{slug}.log"),
