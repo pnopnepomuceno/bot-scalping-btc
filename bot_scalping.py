@@ -1,23 +1,189 @@
 """
-ScalpBot Multi-Conta — Binance Spot + IA (Claude)
-Suporta múltiplas contas Binance com estratégias independentes.
+ScalpBot Multi-Conta Multi-Exchange — Binance + OKX + IA (Claude)
+Suporta múltiplas contas com exchanges, estratégias e pares independentes.
+
+.env: BOT_N_EXCHANGE=binance|okx
 """
 
 import os, time, logging, json, threading, subprocess
 from datetime import datetime
 from dotenv import load_dotenv
 import pandas as pd
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
 import anthropic
 
-# Proxy Tor — contorna bloqueio Binance em VPS nos EUA
+# Proxy Tor — necessário para Binance em VPS nos EUA
+# OKX não precisa de proxy — acesso direto
 os.environ['HTTP_PROXY']  = 'socks5h://127.0.0.1:9050'
 os.environ['HTTPS_PROXY'] = 'socks5h://127.0.0.1:9050'
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 import importlib.util as _ilu
+
+# ── Adapters de Exchange ─────────────────────────────────────────────────────
+
+class BinanceExchange:
+    """Adapter para Binance com proxy Tor."""
+    def __init__(self, key, secret, log, testnet=False):
+        from binance.client import Client
+        from binance.exceptions import BinanceAPIException
+        self.BinanceAPIException = BinanceAPIException
+        self.Client  = Client
+        self._key    = key
+        self._secret = secret
+        self.log     = log
+        self.testnet = testnet
+        self.client  = self._conectar()
+
+    def _conectar(self, max_t=8):
+        from binance.client import Client
+        proxies = {"http":"socks5h://127.0.0.1:9050","https":"socks5h://127.0.0.1:9050"}
+        for i in range(1, max_t+1):
+            try:
+                c = Client(self._key, self._secret, requests_params={"proxies":proxies})
+                self.log.info(f"[BINANCE][TOR] Conectada (tentativa {i})")
+                return c
+            except Exception as e:
+                if "restricted location" in str(e) or "403" in str(e) or "cloudfront" in str(e).lower():
+                    self.log.warning(f"[TOR] Nó bloqueado ({i}/{max_t}) — trocando...")
+                    try:
+                        subprocess.run(["sudo","systemctl","restart","tor"],timeout=10,capture_output=True)
+                        time.sleep(20)
+                    except: time.sleep(10)
+                else: raise
+        raise ConnectionError(f"[BINANCE] Bloqueada após {max_t} tentativas Tor.")
+
+    def reconectar(self): self.client = self._conectar()
+
+    def get_klines(self, symbol, limit=100):
+        from binance.client import Client
+        return self.client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=limit)
+
+    def get_ticker(self, symbol):
+        return self.client.get_ticker(symbol=symbol)
+
+    def get_balances(self):
+        info = self.client.get_account()
+        return {b["asset"]: float(b["free"]) for b in info["balances"] if float(b["free"]) > 0}
+
+    def get_usdt(self, balances): return balances.get("USDT", 0.0)
+
+    def get_precision(self, symbol):
+        info = self.client.get_symbol_info(symbol)
+        for f in info["filters"]:
+            if f["filterType"] == "LOT_SIZE":
+                step = f["stepSize"].rstrip("0")
+                return len(step.split(".")[-1]) if "." in step else 0
+        return 5
+
+    def buy_market(self, symbol, qty, precision):
+        return self.client.order_market_buy(symbol=symbol, quantity=f"{qty:.{precision}f}")
+
+    def sell_market(self, symbol, qty, precision, balances):
+        asset = symbol.replace("USDT","")
+        avail = balances.get(asset, 0.0)
+        qty_r = min(qty, avail)
+        if qty_r < 10**(-precision):
+            self.log.warning(f"[BINANCE] Saldo insuficiente SELL {symbol}: {avail}")
+            return None
+        return self.client.order_market_sell(symbol=symbol, quantity=f"{qty_r:.{precision}f}")
+
+    def format_pair(self, symbol):
+        return symbol.replace("-","")
+
+    @property
+    def name(self): return "Binance"
+
+
+class OKXExchange:
+    """Adapter para OKX — sem proxy, acesso direto."""
+    def __init__(self, key, secret, passphrase, log, testnet=False):
+        self._key        = key
+        self._secret     = secret
+        self._passphrase = passphrase
+        self.log         = log
+        self.testnet     = testnet
+        self._init()
+
+    def _init(self):
+        try:
+            import okx.MarketData as MD
+            import okx.Trade as TR
+            import okx.Account as AC
+            flag = "1" if self.testnet else "0"
+            self._market  = MD.MarketAPI(flag=flag, debug=False)
+            self._trade   = TR.TradeAPI(self._key,self._secret,self._passphrase,False,flag,debug=False)
+            self._account = AC.AccountAPI(self._key,self._secret,self._passphrase,False,flag,debug=False)
+            self.log.info("[OKX] Conectada com sucesso!")
+        except ImportError:
+            raise ImportError("python-okx não instalado. Execute: pip install python-okx")
+
+    def reconectar(self): self._init()
+
+    def get_klines(self, symbol, limit=100):
+        r = self._market.get_candlesticks(instId=symbol, bar="1m", limit=str(limit))
+        if r.get("code") != "0": raise Exception(f"OKX klines: {r}")
+        candles = list(reversed(r["data"]))
+        return [[int(c[0]),c[1],c[2],c[3],c[4],c[5],0,0,0,0,0,0] for c in candles]
+
+    def get_ticker(self, symbol):
+        r = self._market.get_ticker(instId=symbol)
+        if r.get("code") != "0": raise Exception(f"OKX ticker: {r}")
+        d = r["data"][0]
+        sod = float(d.get("sodUtc8", d.get("last","1")) or "1")
+        last = float(d.get("last","0") or "0")
+        chg_pct = (last - sod) / sod * 100 if sod else 0
+        return {
+            "quoteVolume":        d.get("volCcy24h","0"),
+            "priceChangePercent": str(round(chg_pct,2)),
+            "highPrice":          d.get("high24h","0"),
+            "lowPrice":           d.get("low24h","0"),
+            "lastPrice":          d.get("last","0"),
+        }
+
+    def get_balances(self):
+        r = self._account.get_account_balance()
+        if r.get("code") != "0": raise Exception(f"OKX balance: {r}")
+        out = {}
+        for item in r["data"][0]["details"]:
+            free = float(item.get("availBal","0") or "0")
+            if free > 0: out[item["ccy"]] = free
+        return out
+
+    def get_usdt(self, balances): return balances.get("USDT", 0.0)
+
+    def get_precision(self, symbol):
+        r = self._market.get_instruments(instType="SPOT", instId=symbol)
+        if r.get("code") != "0": return 6
+        lot = r["data"][0].get("lotSz","0.000001").rstrip("0")
+        return len(lot.split(".")[-1]) if "." in lot else 0
+
+    def buy_market(self, symbol, qty, precision):
+        r = self._trade.place_order(instId=symbol,tdMode="cash",side="buy",
+                                     ordType="market",sz=f"{qty:.{precision}f}")
+        if r.get("code") != "0": raise Exception(f"OKX buy: {r}")
+        return r
+
+    def sell_market(self, symbol, qty, precision, balances):
+        asset = symbol.split("-")[0]
+        avail = balances.get(asset, 0.0)
+        qty_r = min(qty, avail)
+        if qty_r < 10**(-precision):
+            self.log.warning(f"[OKX] Saldo insuficiente SELL {symbol}: {avail}")
+            return None
+        r = self._trade.place_order(instId=symbol,tdMode="cash",side="sell",
+                                     ordType="market",sz=f"{qty_r:.{precision}f}")
+        if r.get("code") != "0": raise Exception(f"OKX sell: {r}")
+        return r
+
+    def format_pair(self, symbol):
+        if "-" not in symbol and len(symbol) > 4:
+            return symbol[:-4] + "-" + symbol[-4:]
+        return symbol
+
+    @property
+    def name(self): return "OKX"
+
 
 def carregar_estrategia(nome: str):
     """Carrega um arquivo de estratégia da pasta strategies/."""
@@ -74,8 +240,14 @@ def send_telegram(token: str, chat_id: str, msg: str, log):
 
 # ── Indicadores ───────────────────────────────────────────────────────────────
 
-def get_klines(client, symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
-    raw = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+def get_klines(exchange_or_client, symbol: str, interval=None, limit: int = 100) -> pd.DataFrame:
+    if hasattr(exchange_or_client, 'get_klines') and callable(getattr(exchange_or_client, 'get_klines')):
+        # Exchange adapter (BinanceExchange ou OKXExchange)
+        raw = exchange_or_client.get_klines(symbol, limit)
+    else:
+        # Binance client legado
+        from binance.client import Client
+        raw = exchange_or_client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=limit)
     df  = pd.DataFrame(raw, columns=[
         "open_time","open","high","low","close","volume",
         "close_time","quote_vol","trades","taker_buy_base","taker_buy_quote","ignore"
@@ -213,7 +385,8 @@ def ask_ia(ai_client, symbol: str, ind: dict, usdt: float, position,
         custo = 0.003 if "sonnet" in model else 0.00025
         log.info(f"[IA] {model.split('-')[1]} score={score} #={ai_calls['count']} ~${custo:.5f}")
         text = resp.content[0].text.strip().replace("```json","").replace("```","").strip()
-        return json.loads(text)
+        import re as _re; m = _re.search(r'\{[^{}]+\}', text)
+        return json.loads(m.group(0)) if m else fallback_tecnico(ind, usdt, position, min_usdt)
     except Exception as e:
         log.error(f"Erro IA: {e}")
         return fallback_tecnico(ind, usdt, position, min_usdt)
@@ -264,11 +437,22 @@ class ScalpBot:
         self.estrategia = carregar_estrategia(nome_estrategia)
         self.log.info(f"[ESTRATEGIA] {self.estrategia.NOME} v{self.estrategia.VERSAO} — {self.estrategia.DESCRICAO}")
 
-        self._binance_key    = cfg["binance_key"]
-        self._binance_secret = cfg["binance_secret"]
-        self.binance = self._conectar_binance()
-        self.ai      = anthropic.Anthropic(api_key=cfg["anthropic_key"])
+        # Inicializa exchange correta
+        exchange_name = cfg.get("exchange","binance").lower()
+        self.exchange_name = exchange_name
+        if exchange_name == "okx":
+            self.exchange = OKXExchange(
+                cfg.get("okx_key",""), cfg.get("okx_secret",""), cfg.get("okx_passphrase",""),
+                self.log, self.testnet
+            )
+            self.pairs = [self.exchange.format_pair(p) for p in self.pairs]
+            self.binance = None  # compatibilidade
+        else:
+            self.exchange = BinanceExchange(cfg["binance_key"], cfg["binance_secret"], self.log, self.testnet)
+            self.binance = self.exchange.client  # compatibilidade legada
+            self.pairs = [self.exchange.format_pair(p) for p in self.pairs]
 
+        self.ai = anthropic.Anthropic(api_key=cfg["anthropic_key"])
         self.state = {
             "position": None, "active_symbol": None,
             "trades": [], "pnl": 0.0, "wins": 0, "losses": 0,
@@ -276,29 +460,9 @@ class ScalpBot:
         self.ai_calls = {"count": 0, "data": ""}
         self.cycle    = 0
 
-    def _conectar_binance(self, max_tentativas: int = 8) -> Client:
-        """Conecta à Binance via Tor, trocando nó automaticamente se bloqueado."""
-        proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
-        for tentativa in range(1, max_tentativas + 1):
-            try:
-                client = Client(
-                    self._binance_key, self._binance_secret,
-                    requests_params={"proxies": proxies}
-                )
-                self.log.info(f"[TOR] Binance conectada (tentativa {tentativa})")
-                return client
-            except Exception as e:
-                if "restricted location" in str(e) or "403" in str(e) or "cloudfront" in str(e).lower():
-                    self.log.warning(f"[TOR] Nó bloqueado ({tentativa}/{max_tentativas}) — trocando nó...")
-                    try:
-                        subprocess.run(["sudo", "systemctl", "restart", "tor"],
-                                       timeout=10, capture_output=True)
-                        time.sleep(20)
-                    except Exception:
-                        time.sleep(10)
-                else:
-                    raise
-        raise ConnectionError(f"[TOR] Binance bloqueou {max_tentativas} nós. VPS precisa ser migrada para Europa.")
+    # _conectar_binance mantido para compatibilidade
+    def _conectar_binance(self, max_tentativas: int = 8):
+        return self.exchange._conectar(max_tentativas) if hasattr(self.exchange, '_conectar') else None
 
     def notify(self, msg: str, tipo: str = None):
         self.log.info(msg)
@@ -312,8 +476,10 @@ class ScalpBot:
         send_telegram(self.tg_token, self.tg_chat, prefixo + msg, self.log)
 
     def get_balances(self) -> dict:
-        info = self.binance.get_account()
-        return {b["asset"]: float(b["free"]) for b in info["balances"] if float(b["free"]) > 0}
+        return self.exchange.get_balances()
+
+    def get_usdt(self) -> float:
+        return self.exchange.get_usdt(self.get_balances())
 
     def check_exit(self, price: float):
         pos = self.state["position"]
@@ -331,25 +497,17 @@ class ScalpBot:
             self.notify(f"[SIM] {side} {qty} {symbol} @ ${price:,.4f}")
             return {"status":"SIMULATED"}
         try:
-            precision = get_symbol_precision(self.binance, symbol)
-            qty_str   = f"{qty:.{precision}f}"
+            precision = self.exchange.get_precision(symbol)
+            balances  = self.get_balances()
             if side == "BUY":
-                order = self.binance.order_market_buy(symbol=symbol, quantity=qty_str)
+                order = self.exchange.buy_market(symbol, qty, precision)
             else:
-                # Verifica saldo antes de vender
-                bals = self.get_balances()
-                asset = symbol.replace("USDT","")
-                available = bals.get(asset, 0.0)
-                qty_real = min(float(qty_str), available)
-                if qty_real < 10 ** (-precision):
-                    self.log.warning(f"Saldo insuficiente para SELL {symbol}: {available}")
-                    return None
-                qty_str = f"{qty_real:.{precision}f}"
-                order = self.binance.order_market_sell(symbol=symbol, quantity=qty_str)
-            emoji = "🟢" if side == "BUY" else "🔴"
-            self.notify(f"{emoji} {side} {qty_str} {symbol} @ ~${price:,.4f}")
+                order = self.exchange.sell_market(symbol, qty, precision, balances)
+            if order:
+                emoji = "🟢" if side == "BUY" else "🔴"
+                self.notify(f"{emoji} {side} {qty:.{precision}f} {symbol} @ ~${price:,.4f}")
             return order
-        except BinanceAPIException as e:
+        except Exception as e:
             self.notify(f"❌ Erro {side} {symbol}: {e}")
             return None
 
@@ -358,7 +516,7 @@ class ScalpBot:
         if amount < self.min_usdt:
             self.log.info(f"USDT insuficiente: ${amount:.2f}")
             return
-        precision = get_symbol_precision(self.binance, symbol)
+        precision = self.exchange.get_precision(symbol)
         qty   = round(amount / price, precision)
         order = self.place_order(symbol, "BUY", qty, price)
         if order:
@@ -395,7 +553,8 @@ class ScalpBot:
             self.state["position"] = None
 
     def run(self):
-        self.notify(f"🤖 Bot '{self.name}' iniciado!", tipo="inicio")
+        exch = getattr(self.exchange, 'name', 'Exchange')
+        self.notify(f"🤖 Bot '{self.name}' iniciado na {exch}!", tipo="inicio")
         self.notify(
             f"Pares: {', '.join(self.pairs)}\n"
             f"Modo: {'SIMULAÇÃO' if self.testnet else '⚠️ REAL'} | "
@@ -420,7 +579,7 @@ class ScalpBot:
                           if self.state["position"]
                           else self.state["active_symbol"] or self.pairs[0])
 
-                df  = get_klines(self.binance, symbol, Client.KLINE_INTERVAL_1MINUTE)
+                df  = get_klines(self.exchange, symbol, None)
                 ind = get_indicators(df)
                 price = ind["price"]
 
@@ -467,7 +626,9 @@ class ScalpBot:
                 if "restricted location" in err or "cloudfront" in err.lower() or "403" in err:
                     self.log.warning("[TOR] Bloqueio no loop — reconectando...")
                     try:
-                        self.binance = self._conectar_binance()
+                        self.exchange.reconectar()
+                        if hasattr(self.exchange, 'client'):
+                            self.binance = self.exchange.client
                         self.log.info("[TOR] Reconectado com sucesso!")
                     except Exception as re:
                         self.log.error(f"[TOR] Falha ao reconectar: {re}")
@@ -485,8 +646,12 @@ def load_bot_config(prefix: str) -> dict:
     return {
         "name":           g("NAME", prefix),
         "emoji":          g("EMOJI", "🤖"),
+        "exchange":       g("EXCHANGE","binance"),
         "binance_key":    g("BINANCE_KEY"),
         "binance_secret": g("BINANCE_SECRET"),
+        "okx_key":        g("OKX_KEY"),
+        "okx_secret":     g("OKX_SECRET"),
+        "okx_passphrase": g("OKX_PASSPHRASE"),
         "anthropic_key":  g("ANTHROPIC_KEY"),
         "telegram_token": g("TELEGRAM_TOKEN"),
         "telegram_chat":  g("TELEGRAM_CHAT"),
@@ -522,9 +687,15 @@ if __name__ == "__main__":
     for i in range(1, bot_count + 1):
         prefix = f"BOT_{i}"
         cfg    = load_bot_config(prefix)
-        if not cfg["binance_key"] or not cfg["binance_key"].strip():
-            print(f"[AVISO] {prefix} sem chave Binance — verifique o .env")
-            continue
+        exch = cfg.get("exchange","binance").lower()
+        if exch == "okx":
+            if not cfg.get("okx_key","").strip():
+                print(f"[AVISO] {prefix} sem chave OKX — verifique o .env")
+                continue
+        else:
+            if not cfg.get("binance_key","").strip():
+                print(f"[AVISO] {prefix} sem chave Binance — verifique o .env")
+                continue
         bot = ScalpBot(cfg)
         t   = threading.Thread(target=bot.run, name=f"bot-{i}", daemon=True)
         threads.append(t)
