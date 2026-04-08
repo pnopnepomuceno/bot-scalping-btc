@@ -17,6 +17,19 @@ os.environ['HTTPS_PROXY'] = 'socks5h://127.0.0.1:9050'
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
+import importlib.util as _ilu
+
+def carregar_estrategia(nome: str):
+    """Carrega um arquivo de estratégia da pasta strategies/."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, "strategies", f"{nome}.py")
+    if not os.path.exists(path):
+        path = os.path.join(base, "strategies", "estrategia_padrao.py")
+    spec   = _ilu.spec_from_file_location(nome, path)
+    modulo = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
+
 # ── Utilitários ───────────────────────────────────────────────────────────────
 
 def setup_logger(name: str, log_file: str) -> logging.Logger:
@@ -245,6 +258,12 @@ class ScalpBot:
             f"bot_{self.name.lower().replace(' ','_')}.log"
         )
         self.log = setup_logger(self.name, log_file)
+
+        # Carrega estratégia do bot
+        nome_estrategia = cfg.get("estrategia", "estrategia_padrao")
+        self.estrategia = carregar_estrategia(nome_estrategia)
+        self.log.info(f"[ESTRATEGIA] {self.estrategia.NOME} v{self.estrategia.VERSAO} — {self.estrategia.DESCRICAO}")
+
         self._binance_key    = cfg["binance_key"]
         self._binance_secret = cfg["binance_secret"]
         self.binance = self._conectar_binance()
@@ -390,7 +409,7 @@ class ScalpBot:
 
                 if self.cycle == 1 or self.cycle % self.scan_interval == 0:
                     if not self.state["position"]:
-                        best = scan_best_pair(self.binance, self.pairs, self.log)
+                        best = self.estrategia.scan_best_pair(self.binance, self.pairs, self.log)
                         if best["symbol"] != self.state["active_symbol"]:
                             old = self.state["active_symbol"]
                             self.state["active_symbol"] = best["symbol"]
@@ -436,7 +455,7 @@ class ScalpBot:
                 else:
                     self.log.info("Aguardando...")
 
-                score_pre, _ = calcular_score(ind, self.state["position"])
+                score_pre, _ = self.estrategia.calcular_score(ind, self.state["position"])
                 sleep = self.loop_signal if score_pre >= self.score_ia or self.state["position"] else self.loop_base
                 time.sleep(sleep)
 
@@ -472,6 +491,7 @@ def load_bot_config(prefix: str) -> dict:
         "telegram_token": g("TELEGRAM_TOKEN"),
         "telegram_chat":  g("TELEGRAM_CHAT"),
         "pairs":          [p.strip() for p in pairs_raw.split(",")],
+        "estrategia":     g("ESTRATEGIA", "estrategia_padrao"),
         "trade_pct":      float(g("TRADE_PCT","0.90")),
         "stop_loss":      float(g("STOP_LOSS","0.005")),
         "take_profit":    float(g("TAKE_PROFIT","0.010")),
