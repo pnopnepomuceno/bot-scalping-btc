@@ -1200,66 +1200,111 @@ threading.Thread(target=_tg_poller,daemon=True,name="tg-poller").start()
 
 @app.route("/api/wallet/<int:bot_idx>")
 def api_wallet(bot_idx):
-    """Retorna carteira real do bot — preços via Binance pública."""
+    """Retorna carteira estimada baseada nos logs do bot + preços públicos sem Tor."""
     try:
         import requests as rq
+        bots = get_all_bots()
+        if bot_idx >= len(bots):
+            return jsonify({"assets":[],"total_usd":0,"error":"Bot não encontrado"})
+        
+        b = bots[bot_idx]
+        exchange = b.get("exchange","binance")
+        
+        # Coleta ativos conhecidos via log
+        assets_qty = {}
+        
+        # USDT livre (lido do log)
+        usdt = b.get("usdt") or 0
+        if usdt > 0:
+            assets_qty["USDT"] = usdt
+        
+        # Posição aberta atual
+        pos = b.get("position")
+        if pos:
+            sym = pos.get("symbol","")
+            qty = float(pos.get("qty") or 0)
+            asset = sym.replace("USDT","").replace("-USDT","")
+            if asset and qty > 0:
+                assets_qty[asset] = assets_qty.get(asset,0) + qty
+        
+        # Operações abertas ainda não fechadas (compras sem venda)
+        trades = b.get("trades",[])
+        
+        # Detectar pares da carteira via log (BOT_HL)
+        wallet_pairs = {}
         prefix = f"BOT_{bot_idx+1}"
-        exchange = os.getenv(f"{prefix}_EXCHANGE","binance").lower()
+        log_file_candidates = [
+            os.path.join(BASE, f"bot_bot_{b['name'].lower().replace(' ','_')}.log"),
+            os.path.join(BASE, f"bot_{b['name'].lower().replace(' ','_')}.log"),
+        ]
+        log_file = next((f for f in log_file_candidates if os.path.exists(f)), None)
+        if log_file:
+            try:
+                import re as re2
+                re_cart = re2.compile(r'\[CARTEIRA\] Par detectado: ([\w-]+?)(?:-USDT|USDT)? \(saldo: ([\d.]+)\)')
+                for line in open(log_file, encoding='utf-8').readlines()[-500:]:
+                    m = re_cart.search(line)
+                    if m:
+                        wallet_pairs[m.group(1)] = float(m.group(2))
+            except: pass
         
-        if exchange == "okx":
-            # OKX wallet via log (não tem acesso direto aqui)
-            bots = get_all_bots()
-            b = bots[bot_idx] if bot_idx < len(bots) else {}
-            return jsonify({"exchange":"okx","assets":[],"total_usd":0,"note":"Carteira OKX disponível via log"})
+        # Adiciona ativos da carteira detectados
+        for asset, qty in wallet_pairs.items():
+            if qty > 0.0001:
+                assets_qty[asset] = max(assets_qty.get(asset,0), qty)
         
-        # Binance — busca saldos reais
-        key    = os.getenv(f"{prefix}_BINANCE_KEY","").strip()
-        secret = os.getenv(f"{prefix}_BINANCE_SECRET","").strip()
-        if not key or not secret:
-            return jsonify({"exchange":"binance","assets":[],"total_usd":0,"error":"Sem credenciais"})
+        if not assets_qty:
+            return jsonify({"exchange":exchange,"assets":[],"total_usd":0,
+                "note":"Sem saldos detectados. Os saldos são lidos dos logs do bot."})
         
+        # Busca preços via Binance pública (sem proxy, sem auth)
+        prices = {"USDT":1.0,"BUSD":1.0,"USDC":1.0,"BRL":0.18}
         try:
-            from binance.client import Client
-            proxies = {"http":"socks5h://127.0.0.1:9050","https":"socks5h://127.0.0.1:9050"}
-            client = Client(key, secret, requests_params={"proxies": proxies})
-            info = client.get_account()
-            balances = [b for b in info["balances"] if float(b["free"])+float(b["locked"]) > 0.00001]
-        except Exception as e:
-            return jsonify({"exchange":"binance","assets":[],"total_usd":0,"error":str(e)})
+            r = rq.get("https://api.binance.com/api/v3/ticker/price", timeout=8)
+            if r.status_code == 200:
+                for t in r.json():
+                    if t["symbol"].endswith("USDT"):
+                        prices[t["symbol"].replace("USDT","")] = float(t["price"])
+        except:
+            # Fallback: tenta via proxy Tor
+            try:
+                proxies = {"http":"socks5h://127.0.0.1:9050","https":"socks5h://127.0.0.1:9050"}
+                r = rq.get("https://api.binance.com/api/v3/ticker/price", timeout=8, proxies=proxies)
+                if r.status_code == 200:
+                    for t in r.json():
+                        if t["symbol"].endswith("USDT"):
+                            prices[t["symbol"].replace("USDT","")] = float(t["price"])
+            except: pass
         
-        # Busca preços via API pública (sem auth)
-        prices = {"USDT": 1.0, "BUSD": 1.0, "USDC": 1.0}
-        try:
-            r = rq.get("https://api.binance.com/api/v3/ticker/price", timeout=5, proxies=proxies)
-            for t in r.json():
-                if t["symbol"].endswith("USDT"):
-                    asset = t["symbol"].replace("USDT","")
-                    prices[asset] = float(t["price"])
-        except: pass
-        
+        # Monta lista de assets
         assets = []
-        for b in balances:
-            asset = b["asset"]
-            qty   = float(b["free"]) + float(b["locked"])
+        for asset, qty in assets_qty.items():
             price = prices.get(asset, 0)
-            usd   = qty * price
-            if usd > 0.01:  # ignora poeira
+            usd   = round(qty * price, 2)
+            if usd >= 0.01 or asset == "USDT":
                 assets.append({
                     "asset": asset,
                     "qty":   round(qty, 8),
-                    "price": price,
-                    "usd":   round(usd, 2),
-                    "locked": float(b["locked"]) > 0,
+                    "price": round(price, 6),
+                    "usd":   usd,
+                    "locked": pos is not None and asset == (pos.get("symbol","").replace("USDT","").replace("-USDT","")),
                 })
         
         assets.sort(key=lambda x: x["usd"], reverse=True)
         total_usd = sum(a["usd"] for a in assets)
-        
-        # Calcula percentual
         for a in assets:
             a["pct"] = round(a["usd"]/total_usd*100, 1) if total_usd > 0 else 0
         
-        return jsonify({"exchange":"binance","assets":assets,"total_usd":round(total_usd,2)})
+        # Monta nota explicativa correta
+        exchange_name = "Binance" if exchange == "binance" else "OKX"
+        note = f"Saldos de {exchange_name} lidos via logs do bot"
+        
+        return jsonify({
+            "exchange":  exchange,
+            "assets":    assets,
+            "total_usd": round(total_usd, 2),
+            "note":      note
+        })
     except Exception as e:
         return jsonify({"error":str(e),"assets":[],"total_usd":0})
 
