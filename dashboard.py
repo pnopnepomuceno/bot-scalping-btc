@@ -258,6 +258,23 @@ tr:hover td{background:rgba(255,255,255,.02)}
 
 /* Help icon */
 .hi{font-size:10px;color:var(--dim);cursor:help}
+
+/* Carteira */
+.wallet-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:14px}
+.wallet-total{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.wallet-total-v{font-family:var(--mono);font-size:22px;font-weight:600}
+.wallet-sub{font-size:11px;color:var(--muted);margin-top:2px;font-family:var(--mono)}
+.wallet-row{display:flex;align-items:center;padding:9px 14px;border-bottom:1px solid rgba(255,255,255,.03);gap:12px}
+.wallet-row:last-child{border:none}
+.wallet-asset{font-family:var(--mono);font-size:12px;font-weight:600;width:48px}
+.wallet-bar-wrap{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.wallet-bar{height:100%;border-radius:2px;background:var(--blue);transition:width .5s}
+.wallet-pct{font-family:var(--mono);font-size:11px;color:var(--muted);width:38px;text-align:right}
+.wallet-qty{font-family:var(--mono);font-size:10px;color:var(--dim);width:110px;text-align:right}
+.wallet-usd{font-family:var(--mono);font-size:12px;font-weight:600;width:65px;text-align:right}
+.wallet-loading{padding:20px;text-align:center;color:var(--dim);font-size:12px}
+.wallet-usdt{background:var(--blue-bg)}.wallet-btc{background:rgba(247,147,26,.3)}.wallet-eth{background:rgba(98,126,234,.3)}
+.wallet-sol{background:rgba(148,94,255,.3)}.wallet-other{background:rgba(90,114,153,.3)}
 </style>
 </head>
 <body>
@@ -548,6 +565,12 @@ function buildBotView(b,idx){
           </table></div>
         </div>
 
+        <!-- Carteira -->
+        <div class="section">Carteira</div>
+        <div class="wallet-wrap" id="wallet-${idx}">
+          <div class="wallet-loading">Carregando carteira...</div>
+        </div>
+
         <!-- Scanner -->
         <div class="section">Scanner de Mercado</div>
         <div class="scanner-wrap">
@@ -790,6 +813,35 @@ async function showReport(){
   const el=document.getElementById('rr');el.style.display='block';el.textContent=d.text||'Erro';
 }
 
+async function loadWallet(idx){
+  const el=document.getElementById('wallet-'+idx);if(!el)return;
+  try{
+    const d=await fetch('/api/wallet/'+idx).then(r=>r.json());
+    if(d.error||!d.assets?.length){
+      el.innerHTML='<div class="wallet-loading">'+((d.error||d.note)||'Sem saldo disponível')+'</div>';return;
+    }
+    const maxPct=Math.max(...d.assets.map(a=>a.pct),1);
+    const barColors={USDT:'var(--green)',BTC:'#f7931a',ETH:'#627eea',SOL:'#9400ff',BNB:'#f0b90b'};
+    el.innerHTML=`<div class="wallet-total">
+      <div>
+        <div style="font-size:10px;font-weight:600;letter-spacing:.1em;color:var(--muted);text-transform:uppercase;margin-bottom:4px" data-tip="Valor total da carteira desta conta em dólares">TOTAL DA CARTEIRA <span class="hi">?</span></div>
+        <div class="wallet-total-v">$${(d.total_usd||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+        <div class="wallet-sub">${d.assets.length} ativo${d.assets.length!==1?'s':''} · ${d.exchange.toUpperCase()}</div>
+      </div>
+    </div>`+d.assets.map(a=>{
+      const bar=barColors[a.asset]||'var(--muted)';
+      const barW=(a.pct/maxPct*100).toFixed(0);
+      const locked=a.locked?'<span style="font-size:9px;color:var(--amber);margin-left:4px" data-tip="Quantidade bloqueada em ordem aberta">🔒</span>':'';
+      return`<div class="wallet-row" data-tip="${a.asset}: $${a.price.toLocaleString('pt-BR',{minimumFractionDigits:2})} por unidade">
+        <div class="wallet-asset">${a.asset}${locked}</div>
+        <div class="wallet-bar-wrap"><div class="wallet-bar" style="width:${barW}%;background:${bar}"></div></div>
+        <div class="wallet-pct">${a.pct}%</div>
+        <div class="wallet-qty">${a.qty.toFixed(6).replace(/\.?0+$/,'')}</div>
+        <div class="wallet-usd" style="color:${a.asset==='USDT'&&a.usd<10?'var(--red)':'var(--text)'}">$${a.usd.toLocaleString('pt-BR',{minimumFractionDigits:2})}</div>
+      </div>`;}).join('');
+  }catch(e){el.innerHTML='<div class="wallet-loading">Erro ao carregar carteira</div>';}
+}
+
 async function refresh(){
   try{
     const data=await fetch('/api/bots').then(r=>r.json());
@@ -845,7 +897,7 @@ async function refresh(){
         const xb=`<span class="xbadge ${ex==='okx'?'xb-okx':'xb-bnb'}">${ex.toUpperCase()}</span>`;
         btn2.innerHTML=`<div class="nb ${b.bot_running?'on':''}"></div>${b.emoji||'🤖'} ${b.name} ${xb}`;
       }
-      bots[i]=b;updBotPanel(b,i);
+      bots[i]=b;updBotPanel(b,i);if(document.getElementById('wallet-'+i))loadWallet(i);
     });
     updOv(data);
 
@@ -1145,6 +1197,72 @@ threading.Thread(target=_tg_poller,daemon=True,name="tg-poller").start()
 
 
 # ── Rotas Flask ───────────────────────────────────────────────────────────────
+
+@app.route("/api/wallet/<int:bot_idx>")
+def api_wallet(bot_idx):
+    """Retorna carteira real do bot — preços via Binance pública."""
+    try:
+        import requests as rq
+        prefix = f"BOT_{bot_idx+1}"
+        exchange = os.getenv(f"{prefix}_EXCHANGE","binance").lower()
+        
+        if exchange == "okx":
+            # OKX wallet via log (não tem acesso direto aqui)
+            bots = get_all_bots()
+            b = bots[bot_idx] if bot_idx < len(bots) else {}
+            return jsonify({"exchange":"okx","assets":[],"total_usd":0,"note":"Carteira OKX disponível via log"})
+        
+        # Binance — busca saldos reais
+        key    = os.getenv(f"{prefix}_BINANCE_KEY","").strip()
+        secret = os.getenv(f"{prefix}_BINANCE_SECRET","").strip()
+        if not key or not secret:
+            return jsonify({"exchange":"binance","assets":[],"total_usd":0,"error":"Sem credenciais"})
+        
+        try:
+            from binance.client import Client
+            proxies = {"http":"socks5h://127.0.0.1:9050","https":"socks5h://127.0.0.1:9050"}
+            client = Client(key, secret, requests_params={"proxies": proxies})
+            info = client.get_account()
+            balances = [b for b in info["balances"] if float(b["free"])+float(b["locked"]) > 0.00001]
+        except Exception as e:
+            return jsonify({"exchange":"binance","assets":[],"total_usd":0,"error":str(e)})
+        
+        # Busca preços via API pública (sem auth)
+        prices = {"USDT": 1.0, "BUSD": 1.0, "USDC": 1.0}
+        try:
+            r = rq.get("https://api.binance.com/api/v3/ticker/price", timeout=5, proxies=proxies)
+            for t in r.json():
+                if t["symbol"].endswith("USDT"):
+                    asset = t["symbol"].replace("USDT","")
+                    prices[asset] = float(t["price"])
+        except: pass
+        
+        assets = []
+        for b in balances:
+            asset = b["asset"]
+            qty   = float(b["free"]) + float(b["locked"])
+            price = prices.get(asset, 0)
+            usd   = qty * price
+            if usd > 0.01:  # ignora poeira
+                assets.append({
+                    "asset": asset,
+                    "qty":   round(qty, 8),
+                    "price": price,
+                    "usd":   round(usd, 2),
+                    "locked": float(b["locked"]) > 0,
+                })
+        
+        assets.sort(key=lambda x: x["usd"], reverse=True)
+        total_usd = sum(a["usd"] for a in assets)
+        
+        # Calcula percentual
+        for a in assets:
+            a["pct"] = round(a["usd"]/total_usd*100, 1) if total_usd > 0 else 0
+        
+        return jsonify({"exchange":"binance","assets":assets,"total_usd":round(total_usd,2)})
+    except Exception as e:
+        return jsonify({"error":str(e),"assets":[],"total_usd":0})
+
 
 @app.route("/")
 def index(): return render_template_string(HTML)
