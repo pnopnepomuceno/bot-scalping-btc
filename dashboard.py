@@ -1,1010 +1,786 @@
 """
-ScalpBot Dashboard Unificado v3.1 — porta 5000
-Interface limpa com tooltips explicativos em cada métrica.
-Relatório diário às 22h + comandos via Telegram.
+ScalpBot Dashboard Multi-Conta com temas distintos e controle de notificações
+Acesse: http://localhost:5000
 """
-from flask import Flask, jsonify, render_template_string, request
-import os, re, glob, json, threading, time
-from datetime import datetime, date
+from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for, make_response
+import hashlib, secrets
+import os, re, glob, json
+from datetime import datetime
 from dotenv import load_dotenv, set_key
 
 app  = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 ENV  = os.path.join(BASE, '.env')
 load_dotenv(dotenv_path=ENV)
+app.secret_key = os.getenv("DASHBOARD_SECRET_KEY", secrets.token_hex(32))
 
-HTML = """<!DOCTYPE html>
+# Temas distintos por índice de bot
+THEMES = [
+    {"name":"Azul Neon",  "accent":"#00b4fc","accent2":"#00f5a0","bg":"#070b14","s1":"#0d1526","s2":"#111d35","s3":"#172347"},
+    {"name":"Laranja",    "accent":"#ff6b35","accent2":"#ffd700","bg":"#0f0800","s1":"#1a1000","s2":"#261800","s3":"#332100"},
+    {"name":"Roxo",       "accent":"#a855f7","accent2":"#ec4899","bg":"#09050f","s1":"#140d1f","s2":"#1c1230","s3":"#26183d"},
+    {"name":"Verde",      "accent":"#00e87a","accent2":"#84cc16","bg":"#050f08","s1":"#0a1f10","s2":"#0f2e18","s3":"#153d20"},
+    {"name":"Vermelho",   "accent":"#ff4757","accent2":"#ff9f43","bg":"#0f0505","s1":"#1f0a0a","s2":"#2e0f0f","s3":"#3d1515"},
+]
+
+HTML = r'''<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScalpBot</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0b0f1a;--panel:#111827;--card:#1a2234;--border:#1e2d45;
-  --text:#e8edf5;--muted:#5a7299;--dim:#384d6b;
-  --green:#22c55e;--red:#ef4444;--amber:#f59e0b;--blue:#3b82f6;
-  --green-bg:rgba(34,197,94,.08);--red-bg:rgba(239,68,68,.08);
-  --amber-bg:rgba(245,158,11,.08);--blue-bg:rgba(59,130,246,.08);
-  --font:'IBM Plex Sans',sans-serif;--mono:'IBM Plex Mono',monospace;
+  --accent:#00b4fc;--accent2:#00f5a0;
+  --bg:#070b14;--s1:#0d1526;--s2:#111d35;--s3:#172347;
+  --green:#00f5a0;--red:#ff4757;--amber:#ffa502;--purple:#a66cff;
+  --text:#e8f0ff;--muted:#6b7fa8;--border:rgba(255,255,255,.08);
+  --mono:'JetBrains Mono',monospace;--font:'Outfit',sans-serif;
 }
-body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh}
 
-/* Tooltip system */
-[data-tip]{position:relative;cursor:help}
-[data-tip]::after{
-  content:attr(data-tip);
-  position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);
-  background:#0d1829;border:1px solid var(--border);color:#b0c0d8;
-  font-size:11px;font-family:var(--font);font-weight:400;
-  padding:6px 10px;border-radius:6px;white-space:nowrap;max-width:220px;
-  white-space:normal;text-align:left;line-height:1.5;z-index:1000;
-  opacity:0;pointer-events:none;transition:opacity .15s;
-  box-shadow:0 4px 16px rgba(0,0,0,.4);
-}
-[data-tip]:hover::after{opacity:1}
+.hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;
+  border-bottom:1px solid var(--border);background:var(--s1);position:sticky;top:0;z-index:100}
+.brand{font-family:var(--mono);font-size:14px;font-weight:700;color:var(--accent);letter-spacing:.1em}
+.hdr-r{display:flex;align-items:center;gap:14px}
+.live{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.live.on{background:var(--green);box-shadow:0 0 10px var(--green);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.chip{font-family:var(--mono);font-size:11px;color:var(--muted)}
 
-/* Header */
-.hdr{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:0 20px;height:48px;
-  background:var(--panel);border-bottom:1px solid var(--border);
-  position:sticky;top:0;z-index:100;
-}
-.brand{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--blue);letter-spacing:.1em}
-.hdr-r{display:flex;align-items:center;gap:16px}
-.status-dot{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
-.dot.on{background:var(--green);box-shadow:0 0 8px var(--green);animation:blink 2s infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
-.clk{font-family:var(--mono);font-size:11px;color:var(--dim);background:#0d1829;
-  padding:3px 8px;border-radius:4px;border:1px solid var(--border)}
-
-/* Ticker */
-.ticker{display:flex;overflow-x:auto;scrollbar-width:none;background:var(--panel);border-bottom:1px solid var(--border)}
+.ticker{display:flex;overflow-x:auto;border-bottom:1px solid var(--border);background:var(--s1);scrollbar-width:none}
 .ticker::-webkit-scrollbar{display:none}
-.ti{display:flex;align-items:center;gap:12px;padding:8px 16px;border-right:1px solid var(--border);
-  min-width:130px;flex-shrink:0;cursor:default}
-.ti-sym{font-family:var(--mono);font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.08em}
-.ti-price{font-family:var(--mono);font-size:13px;font-weight:600}
-.ti-chg{font-family:var(--mono);font-size:11px}
+.ti{display:flex;flex-direction:column;align-items:center;padding:9px 20px;
+  border-right:1px solid var(--border);min-width:115px;flex-shrink:0;transition:background .2s;cursor:default}
+.ti:hover{background:var(--s2)}
+.ti.hi{background:rgba(0,180,252,.06);border-bottom:2px solid var(--accent)}
+.ti-s{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.12em;margin-bottom:4px}
+.ti-p{font-family:var(--mono);font-size:14px;font-weight:600}
+.ti-c{font-family:var(--mono);font-size:10px;margin-top:2px}
 .up{color:var(--green)}.dn{color:var(--red)}
 
-/* Nav */
-.nav{display:flex;background:var(--panel);border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
-.nav::-webkit-scrollbar{display:none}
-.ntab{padding:10px 18px;border:none;background:none;color:var(--muted);font-size:12px;font-weight:500;
-  cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;
-  font-family:var(--font);display:flex;align-items:center;gap:7px}
-.ntab:hover{color:var(--text)}
-.ntab.on{color:var(--blue);border-bottom-color:var(--blue)}
-.nb{width:6px;height:6px;border-radius:50%;background:var(--dim);flex-shrink:0}
-.nb.on{background:var(--green)}
-.xbadge{font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px;font-family:var(--mono)}
-.xb-bnb{background:rgba(240,185,11,.15);color:#f0b90b}
-.xb-okx{background:rgba(147,51,234,.15);color:#a855f7}
+main{padding:18px 24px;display:flex;flex-direction:column;gap:16px}
 
-/* Views */
-.view{display:none;padding:20px;max-width:1400px;margin:0 auto}
-.view.on{display:block}
+/* Bot tabs */
+.tabs{display:flex;gap:8px;flex-wrap:wrap}
+.tab{padding:8px 16px;border-radius:8px;border:1px solid var(--border);background:var(--s1);
+  color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;transition:all .2s;
+  display:flex;align-items:center;gap:8px;font-family:var(--font)}
+.tab:hover{border-color:var(--accent);color:var(--accent)}
+.tab.on{background:rgba(0,180,252,.1);border-color:var(--accent);color:var(--accent)}
+.tab .dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}
+.tab .dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.tab .badge-testnet{font-size:9px;background:rgba(255,165,2,.15);color:var(--amber);
+  border:1px solid rgba(255,165,2,.3);padding:1px 6px;border-radius:4px;font-family:var(--mono)}
 
-/* ── VISÃO GERAL ── */
-.ov-top{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
-.metric{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
-.metric-label{font-size:10px;font-weight:600;letter-spacing:.1em;color:var(--muted);text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:4px}
-.metric-value{font-family:var(--mono);font-size:22px;font-weight:600;line-height:1}
-.metric-sub{font-size:11px;color:var(--muted);margin-top:5px;font-family:var(--mono)}
-.mv-pos{color:var(--green)}.mv-neg{color:var(--red)}.mv-blue{color:var(--blue)}.mv-amber{color:var(--amber)}
-.metric.pos{border-left:3px solid var(--green)}.metric.neg{border-left:3px solid var(--red)}
-.metric.blue{border-left:3px solid var(--blue)}.metric.amb{border-left:3px solid var(--amber)}
+.panel{display:none}
+.panel.on{display:flex;flex-direction:column;gap:14px}
 
-/* Bot cards na visão geral */
-.ov-bots{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-bottom:20px}
-.bc{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.bc-head{padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)}
-.bc-name{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}
-.bc-sub{font-size:11px;color:var(--muted);margin-top:2px;font-family:var(--mono)}
-.pill{font-size:9px;font-weight:700;padding:3px 8px;border-radius:12px;font-family:var(--mono);letter-spacing:.04em}
-.pill-on{background:var(--green-bg);color:var(--green);border:1px solid rgba(34,197,94,.2)}
-.pill-off{background:var(--red-bg);color:var(--red);border:1px solid rgba(239,68,68,.2)}
+/* Stats */
+.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+.st{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:14px 16px;position:relative;overflow:hidden}
+.st::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent);opacity:.4}
+.st.g::after{background:var(--green)}.st.r::after{background:var(--red)}.st.a::after{background:var(--amber)}
+.st-l{font-size:9px;color:var(--muted);letter-spacing:.1em;margin-bottom:8px;font-family:var(--mono)}
+.st-v{font-family:var(--mono);font-size:20px;font-weight:700;line-height:1}
+.st-v.g{color:var(--green)}.st-v.r{color:var(--red)}.st-v.b{color:var(--accent)}.st-v.a{color:var(--amber)}
+.st-s{font-size:11px;color:var(--muted);margin-top:5px;font-family:var(--mono)}
 
-.bc-metrics{display:grid;grid-template-columns:repeat(4,1fr)}
-.bc-m{padding:10px 14px;border-right:1px solid var(--border)}
-.bc-m:last-child{border:none}
-.bc-ml{font-size:9px;color:var(--muted);font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
-.bc-mv{font-family:var(--mono);font-size:13px;font-weight:600}
+.mid{display:grid;grid-template-columns:1fr 300px;gap:14px}
+.card{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:16px}
+.ch{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.ct{font-family:var(--mono);font-size:9px;letter-spacing:.12em;color:var(--muted)}
+.cw{position:relative;height:175px}
 
-/* Posição aberta destaque */
-.pos-alert{background:rgba(59,130,246,.06);border-top:1px solid rgba(59,130,246,.15);
-  padding:10px 14px;display:flex;align-items:center;justify-content:space-between}
-.pos-sym{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--blue)}
-.pos-detail{font-size:11px;color:var(--muted);font-family:var(--mono)}
+/* Posição */
+.pos-e{text-align:center;padding:20px;color:var(--muted);font-size:12px;font-family:var(--mono)}
+.pos-h{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;background:rgba(0,245,160,.06);border-radius:7px;margin-bottom:10px}
+.pos-sym{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)}
+.pos-pnl{font-family:var(--mono);font-size:13px;font-weight:700}
+.pr{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border)}
+.pr:last-of-type{border:none}
+.pk{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.pv{font-size:11px;font-weight:600;font-family:var(--mono)}
+.slbar{height:4px;border-radius:2px;background:var(--s3);margin-top:10px;overflow:hidden}
+.slf{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--green),var(--amber),var(--red));transition:width .5s}
 
-/* Tabela de operações */
-.ops-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.ops-head{padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)}
-.ops-title{font-size:13px;font-weight:600}
-.ops-cnt{font-size:11px;color:var(--muted);font-family:var(--mono)}
-.filter-row{display:flex;gap:4px}
-.fb{font-size:10px;font-weight:600;padding:3px 10px;border-radius:4px;border:1px solid var(--border);
-  background:none;color:var(--muted);cursor:pointer;font-family:var(--mono);letter-spacing:.04em;transition:all .1s}
-.fb.on{background:var(--blue-bg);border-color:rgba(59,130,246,.3);color:var(--blue)}
+/* Ops */
+.ops-c{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:16px}
+.op-tabs{display:flex;gap:5px;margin-bottom:12px}
+.ot{font-family:var(--mono);font-size:9px;padding:3px 10px;border-radius:5px;
+  border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer}
+.ot.on{border-color:var(--accent);color:var(--accent);background:rgba(0,180,252,.08)}
 .tw{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px;white-space:nowrap}
-thead th{padding:9px 14px;text-align:left;font-size:9px;letter-spacing:.1em;color:var(--dim);
-  font-weight:600;border-bottom:1px solid var(--border);background:rgba(0,0,0,.2);text-transform:uppercase}
-td{padding:9px 14px;border-bottom:1px solid rgba(255,255,255,.03);color:var(--text)}
-tr:last-child td{border:none}
-tr:hover td{background:rgba(255,255,255,.02)}
-.sym-badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;
-  background:var(--blue-bg);color:var(--blue);border:1px solid rgba(59,130,246,.12)}
-.st-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:9px;font-weight:700}
-.st-open{background:var(--blue-bg);color:var(--blue)}
-.st-win{background:var(--green-bg);color:var(--green)}
-.st-loss{background:var(--red-bg);color:var(--red)}
-.st-tp{color:var(--green)}.st-sl{color:var(--red)}
-.pp{color:var(--green);font-weight:600}.pn{color:var(--red);font-weight:600}
-.empty{text-align:center;color:var(--dim);padding:28px;font-size:12px}
-.tr-open{background:rgba(59,130,246,.03)}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;white-space:nowrap}
+th{color:var(--muted);font-size:8px;letter-spacing:.1em;padding:5px 9px;text-align:left;border-bottom:1px solid var(--border)}
+td{padding:7px 9px;border-bottom:1px solid rgba(255,255,255,.04)}
+tr:last-child td{border:none}tr:hover td{background:var(--s2)}
+.bk{font-size:8px;padding:2px 6px;border-radius:3px;font-weight:700}
+.bb{background:rgba(0,245,160,.12);color:var(--green)}
+.bs{background:rgba(255,71,87,.12);color:var(--red)}
+.bsym{background:rgba(0,180,252,.1);color:var(--accent);border:1px solid rgba(0,180,252,.2)}
+.btp{background:rgba(0,245,160,.1);color:var(--green)}
+.bsl{background:rgba(255,71,87,.1);color:var(--red)}
+.bia{background:rgba(166,108,255,.1);color:var(--purple)}
+.bfb{background:rgba(255,165,2,.1);color:var(--amber)}
+.pp{color:var(--green);font-weight:700}.pn{color:var(--red);font-weight:700}
+.os{display:flex;gap:20px;margin-top:10px;padding-top:8px;border-top:1px solid var(--border)}
+.osi{font-family:var(--mono);font-size:10px;color:var(--muted)}
 
-/* ── BOT INDIVIDUAL ── */
-.bot-layout{display:grid;grid-template-columns:1fr 280px;gap:14px}
-@media(max-width:900px){.bot-layout{grid-template-columns:1fr}}
+/* Perf por par */
+.pg{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:12px}
+.pb{background:var(--s2);border:1px solid var(--border);border-radius:7px;padding:9px 11px}
+.pbn{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--accent);margin-bottom:5px}
+.pbr{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;margin-bottom:2px}
+.pbk{color:var(--muted)}.pbv{color:var(--text)}
 
-.section{font-size:9px;font-weight:600;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;
-  display:flex;align-items:center;gap:8px;margin-bottom:10px;margin-top:18px}
-.section::after{content:'';flex:1;height:1px;background:var(--border)}
-
-/* Status de posição — destaque principal */
-.pos-box{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:14px}
-.pos-box-head{padding:10px 14px;background:rgba(59,130,246,.08);border-bottom:1px solid rgba(59,130,246,.15);
-  display:flex;align-items:center;justify-content:space-between}
-.pos-box-sym{font-family:var(--mono);font-size:18px;font-weight:600;color:var(--blue)}
-.pos-box-body{padding:0}
-.pos-row{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;border-bottom:1px solid var(--border)}
-.pos-row:last-child{border:none}
-.pos-key{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px}
-.pos-val{font-family:var(--mono);font-size:12px;font-weight:600}
-.no-pos{background:var(--card);border:1px solid var(--border);border-radius:8px;
-  padding:24px;text-align:center;color:var(--dim);font-size:12px;margin-bottom:14px}
-
-/* Indicadores técnicos */
-.ind-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
-.ind-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
-.ind-label{font-size:9px;font-weight:600;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;margin-bottom:4px;display:flex;align-items:center;gap:3px}
-.ind-value{font-family:var(--mono);font-size:15px;font-weight:600}
-
-/* Stats row */
-.stats-row{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:14px}
-@media(max-width:1100px){.stats-row{grid-template-columns:repeat(3,1fr)}}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:11px 14px}
-.stat-label{font-size:9px;font-weight:600;letter-spacing:.1em;color:var(--muted);text-transform:uppercase;margin-bottom:6px;display:flex;align-items:center;gap:4px}
-.stat-value{font-family:var(--mono);font-size:18px;font-weight:600}
-.sv-pos{color:var(--green)}.sv-neg{color:var(--red)}.sv-blue{color:var(--blue)}
+.bot{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 
 /* Scanner */
-.scanner-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px}
-.sc-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04)}
-.sc-row:last-child{border:none}
-.sc-sym{font-family:var(--mono);font-size:12px;font-weight:600;width:95px}
-.sc-best{color:var(--blue)}
-.sc-bar-wrap{flex:1;height:3px;background:var(--border);border-radius:2px;overflow:hidden}
-.sc-bar{height:100%;border-radius:2px;background:var(--blue);transition:width .5s}
-.sc-score{font-family:var(--mono);font-size:10px;color:var(--muted);width:38px;text-align:right}
-.sc-chg{font-family:var(--mono);font-size:10px;width:50px;text-align:right}
+.sr{display:grid;grid-template-columns:75px 1fr 65px 65px 60px;gap:7px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)}
+.sr:last-child{border:none}
+.ss{font-family:var(--mono);font-size:11px;font-weight:600}
+.sb-w{background:var(--s3);border-radius:2px;height:3px;overflow:hidden}
+.sb{height:100%;border-radius:2px;background:var(--accent);transition:width .5s}
+.sb.best{background:var(--green)}
+.sn{font-family:var(--mono);font-size:10px;text-align:right}
 
 /* Log */
-.log-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:14px}
-.log-head{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.log-body{height:220px;overflow-y:auto;padding:8px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
-.log-body::-webkit-scrollbar{width:3px}
-.log-body::-webkit-scrollbar-thumb{background:var(--border)}
-.ll{display:block;line-height:17px;color:var(--dim);font-size:10px;padding:1px 3px;font-family:var(--mono);word-break:break-all}
-.ll.buy{color:#22c55e}.ll.sell{color:#ef4444}.ll.scan{color:#6366f1}
-.ll.ia{color:#3b82f6}.ll.warn{color:#f59e0b}.ll.err{color:#ef4444;opacity:.8}
-
-/* Sidebar */
-.sidebar{display:flex;flex-direction:column;gap:12px}
-.side-card{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.side-head{padding:10px 14px;border-bottom:1px solid var(--border);font-size:10px;font-weight:600;
-  letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
-.side-body{padding:14px}
+.lw{height:220px;overflow-y:auto;font-family:var(--mono);font-size:10px;display:flex;flex-direction:column;gap:1px;padding:4px}
+.ll{line-height:1.6;color:#7a8faa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px}
+.ll.buy{color:#00e87a !important}.ll.sell{color:#ff6b6b !important}.ll.warn{color:#ffb347 !important}
+.ll.err{color:#ff4757 !important}.ll.ia{color:#5bc8ff !important}.ll.scan{color:#bf99ff !important}
 
 /* Notificações */
-.notif-grid{display:flex;flex-direction:column;gap:6px}
-.ni{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;
-  background:rgba(255,255,255,.02);border-radius:6px;gap:8px}
-.ni-text{font-size:12px}.ni-desc{font-size:10px;color:var(--muted);margin-top:1px}
-.tog{position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;flex-shrink:0}
-.tog input{opacity:0;width:0;height:0}
-.tog-t{position:absolute;inset:0;background:var(--border);border-radius:10px;transition:.25s}
-.tog-k{position:absolute;left:2px;top:2px;width:16px;height:16px;background:var(--muted);border-radius:50%;transition:.25s}
-.tog input:checked+.tog-t{background:rgba(59,130,246,.3)}
-.tog input:checked~.tog-k{left:18px;background:var(--blue)}
-.save-btn{width:100%;margin-top:10px;padding:8px;border-radius:6px;border:1px solid rgba(59,130,246,.3);
-  background:rgba(59,130,246,.08);color:var(--blue);font-weight:600;font-size:12px;
-  cursor:pointer;font-family:var(--font);transition:all .15s}
-.save-btn:hover{background:rgba(59,130,246,.15)}
-.sm{font-size:11px;color:var(--green);display:none;text-align:center;margin-top:6px;font-family:var(--mono)}
+.notif-panel{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:16px}
+.notif-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px}
+.notif-item{background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:12px;
+  display:flex;align-items:center;justify-content:space-between}
+.notif-label{font-size:12px;color:var(--text);font-family:var(--mono)}
+.notif-desc{font-size:10px;color:var(--muted);margin-top:2px}
+.toggle{position:relative;width:38px;height:20px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle-track{position:absolute;inset:0;background:var(--s3);border-radius:10px;
+  border:1px solid var(--border);cursor:pointer;transition:background .2s}
+.toggle input:checked + .toggle-track{background:var(--accent);border-color:var(--accent)}
+.toggle-thumb{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+  background:#fff;transition:transform .2s;pointer-events:none}
+.toggle input:checked ~ .toggle-thumb{transform:translateX(18px)}
+.save-btn{margin-top:14px;padding:8px 20px;background:var(--accent);color:var(--bg);
+  border:none;border-radius:7px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer}
+.save-btn:hover{opacity:.85}
+.save-msg{font-family:var(--mono);font-size:11px;color:var(--green);margin-left:12px;display:none}
 
-/* Desempenho por par */
-.par-list{display:flex;flex-direction:column;gap:6px}
-.par-item{display:flex;justify-content:space-between;align-items:center;
-  padding:6px 10px;background:rgba(255,255,255,.02);border-radius:6px}
-.par-sym{font-family:var(--mono);font-size:11px;font-weight:600}
-.par-pnl{font-family:var(--mono);font-size:11px;font-weight:600}
-.par-cnt{font-size:10px;color:var(--muted)}
+/* Controles do bot */
+.ctrl-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.ctrl-btn{padding:7px 16px;border-radius:7px;border:1px solid var(--border);background:var(--s2);
+  color:var(--text);font-family:var(--mono);font-size:11px;cursor:pointer;transition:all .2s}
+.ctrl-btn:hover{border-color:var(--accent);color:var(--accent)}
+.ctrl-btn.danger{border-color:rgba(255,71,87,.4);color:var(--red)}
+.ctrl-btn.danger:hover{background:rgba(255,71,87,.1)}
 
-/* Relatório */
-.rep-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:14px}
-.rep-title{font-size:15px;font-weight:600;margin-bottom:4px}
-.rep-sub{font-size:12px;color:var(--muted);margin-bottom:16px;font-family:var(--mono)}
-.rep-btn{padding:8px 16px;border-radius:6px;border:1px solid rgba(59,130,246,.3);
-  background:rgba(59,130,246,.08);color:var(--blue);font-weight:600;font-size:12px;
-  cursor:pointer;font-family:var(--font);margin-right:8px;transition:all .15s}
-.rep-btn:hover{background:rgba(59,130,246,.15)}
-.rep-btn.g{border-color:rgba(34,197,94,.3);background:rgba(34,197,94,.06);color:var(--green)}
-.rep-preview{margin-top:14px;padding:12px;background:#0d1829;border-radius:6px;
-  font-family:var(--mono);font-size:11px;color:var(--muted);white-space:pre-wrap;
-  display:none;max-height:260px;overflow-y:auto;border:1px solid var(--border)}
-.cmd-list{display:flex;flex-direction:column;gap:6px;margin-top:12px}
-.cmd{display:flex;align-items:flex-start;gap:12px;padding:9px 12px;
-  background:rgba(255,255,255,.02);border-radius:6px}
-.cmd-code{font-family:var(--mono);font-size:11px;color:var(--blue);background:var(--blue-bg);
-  padding:2px 8px;border-radius:4px;border:1px solid rgba(59,130,246,.15);white-space:nowrap;flex-shrink:0}
-.cmd-desc{font-size:12px;color:var(--muted);padding-top:1px}
-
-/* Help icon */
-.hi{font-size:10px;color:var(--dim);cursor:help}
-
-/* Carteira */
-.wallet-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:14px}
-.wallet-total{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-.wallet-total-v{font-family:var(--mono);font-size:22px;font-weight:600}
-.wallet-sub{font-size:11px;color:var(--muted);margin-top:2px;font-family:var(--mono)}
-.wallet-row{display:flex;align-items:center;padding:9px 14px;border-bottom:1px solid rgba(255,255,255,.03);gap:12px}
-.wallet-row:last-child{border:none}
-.wallet-asset{font-family:var(--mono);font-size:12px;font-weight:600;width:48px}
-.wallet-bar-wrap{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
-.wallet-bar{height:100%;border-radius:2px;background:var(--blue);transition:width .5s}
-.wallet-pct{font-family:var(--mono);font-size:11px;color:var(--muted);width:38px;text-align:right}
-.wallet-qty{font-family:var(--mono);font-size:10px;color:var(--dim);width:110px;text-align:right}
-.wallet-usd{font-family:var(--mono);font-size:12px;font-weight:600;width:65px;text-align:right}
-.wallet-loading{padding:20px;text-align:center;color:var(--dim);font-size:12px}
-.wallet-usdt{background:var(--blue-bg)}.wallet-btc{background:rgba(247,147,26,.3)}.wallet-eth{background:rgba(98,126,234,.3)}
-.wallet-sol{background:rgba(148,94,255,.3)}.wallet-other{background:rgba(90,114,153,.3)}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 </style>
 </head>
 <body>
 
 <div class="hdr">
-  <div class="brand">SCALP<span style="color:var(--muted);font-weight:400">BOT</span></div>
+  <div class="brand" id="brand">⬡ SCALPBOT</div>
   <div class="hdr-r">
-    <div class="status-dot"><div class="dot" id="live-dot"></div><span id="bot-st">—</span></div>
-    <div class="clk" id="clk">--:--:--</div>
+    <div class="live" id="live-dot"></div>
+    <div class="chip" id="bot-st">verificando...</div>
+    <div class="chip" id="clk">--:--:--</div>
+    <a href="/logout" style="font-size:10px;color:#5a7299;text-decoration:none;padding:3px 10px;border:1px solid #1e2d45;border-radius:4px;font-family:monospace;letter-spacing:.06em">SAIR</a>
   </div>
 </div>
 
-<div class="ticker" id="ticker">
-  <div class="ti" id="tick-BTCUSDT"><div class="ti-sym">BTC</div><div class="ti-price">—</div><div class="ti-chg">—</div></div>
-  <div class="ti" id="tick-ETHUSDT"><div class="ti-sym">ETH</div><div class="ti-price">—</div><div class="ti-chg">—</div></div>
-  <div class="ti" id="tick-BNBUSDT"><div class="ti-sym">BNB</div><div class="ti-price">—</div><div class="ti-chg">—</div></div>
-  <div class="ti" id="tick-SOLUSDT"><div class="ti-sym">SOL</div><div class="ti-price">—</div><div class="ti-chg">—</div></div>
-  <div class="ti" id="tick-XRPUSDT"><div class="ti-sym">XRP</div><div class="ti-price">—</div><div class="ti-chg">—</div></div>
+<div class="ticker">
+  <div class="ti" id="tick-BTCUSDT"><div class="ti-s">BTC</div><div class="ti-p">—</div><div class="ti-c">—</div></div>
+  <div class="ti" id="tick-ETHUSDT"><div class="ti-s">ETH</div><div class="ti-p">—</div><div class="ti-c">—</div></div>
+  <div class="ti" id="tick-BNBUSDT"><div class="ti-s">BNB</div><div class="ti-p">—</div><div class="ti-c">—</div></div>
+  <div class="ti" id="tick-SOLUSDT"><div class="ti-s">SOL</div><div class="ti-p">—</div><div class="ti-c">—</div></div>
+  <div class="ti" id="tick-XRPUSDT"><div class="ti-s">XRP</div><div class="ti-p">—</div><div class="ti-c">—</div></div>
 </div>
 
-<div class="nav" id="nav">
-  <button class="ntab on" onclick="sv('ov',this)">Visão Geral</button>
-</div>
-
-<div id="view-ov" class="view on">
-  <div class="ov-top">
-    <div class="metric" id="m-pnl">
-      <div class="metric-label" data-tip="Lucro ou Prejuízo total somado de todos os bots. Verde = lucro, Vermelho = prejuízo.">PNL TOTAL <span class="hi">?</span></div>
-      <div class="metric-value" id="ov-pnl">$0.0000</div>
-      <div class="metric-sub" id="ov-ps">todas as contas</div>
-    </div>
-    <div class="metric blue">
-      <div class="metric-label" data-tip="Quantos bots estão ativos e processando dados no momento.">BOTS ATIVOS <span class="hi">?</span></div>
-      <div class="metric-value mv-blue" id="ov-bots">—</div>
-      <div class="metric-sub" id="ov-bs">—</div>
-    </div>
-    <div class="metric amb">
-      <div class="metric-label" data-tip="Número de posições de compra abertas. Uma posição aberta significa que o bot comprou e ainda não vendeu.">POSIÇÕES ABERTAS <span class="hi">?</span></div>
-      <div class="metric-value mv-amber" id="ov-pos">0</div>
-      <div class="metric-sub" id="ov-pos-s">—</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label" data-tip="Taxa de acerto: percentual de operações encerradas com lucro. Acima de 55% é considerado bom para scalping.">WIN RATE <span class="hi">?</span></div>
-      <div class="metric-value" id="ov-wr" style="color:var(--blue)">—</div>
-      <div class="metric-sub" id="ov-wrs">0W / 0L</div>
-    </div>
-  </div>
-
-  <div class="section">Contas</div>
-  <div class="ov-bots" id="ov-accs"></div>
-
-  <div class="section">Operações</div>
-  <div class="ops-wrap">
-    <div class="ops-head">
-      <div>
-        <span class="ops-title">Histórico completo</span>
-        <span class="ops-cnt" id="ov-cnt" style="margin-left:10px">—</span>
-      </div>
-      <div class="filter-row">
-        <button class="fb on" onclick="ovf('all',this)">TODAS</button>
-        <button class="fb" onclick="ovf('open',this)">ABERTAS</button>
-        <button class="fb" onclick="ovf('win',this)">GANHOS</button>
-        <button class="fb" onclick="ovf('loss',this)">PERDAS</button>
-      </div>
-    </div>
-    <div class="tw"><table>
-      <thead><tr>
-        <th data-tip="Status atual da operação">STATUS</th>
-        <th>CONTA</th>
-        <th data-tip="Par de negociação (ex: BTC = Bitcoin contra USDT)">PAR</th>
-        <th data-tip="Preço de compra">COMPRA</th>
-        <th data-tip="Preço de venda (ou 'aberta' se ainda não vendeu)">VENDA</th>
-        <th data-tip="Capital investido em dólares">CAPITAL</th>
-        <th data-tip="Lucro ou Prejuízo em dólares desta operação">PNL $</th>
-        <th data-tip="Retorno percentual desta operação">PNL %</th>
-        <th data-tip="Motivo de encerramento: SL=Stop Loss (limite de perda), TP=Take Profit (meta de lucro), Tec=decisão técnica da IA">MOTIVO</th>
-        <th>HORA</th>
-      </tr></thead>
-      <tbody id="ov-ops"></tbody>
-    </table></div>
-  </div>
-</div>
-
-<div id="panels"></div>
+<main>
+  <div class="tabs" id="tabs"></div>
+  <div id="panels"></div>
+</main>
 
 <script>
-const NOTIF={
-  inicio:{l:'Inicialização',d:'Bot ligou ou desligou'},
-  compra:{l:'Compra',d:'Compra executada'},
-  venda:{l:'Venda',d:'Venda executada'},
-  stop_loss:{l:'Stop Loss',d:'Limite de perda atingido'},
-  take_profit:{l:'Take Profit',d:'Meta de lucro atingida'},
-  par_troca:{l:'Troca de par',d:'Bot mudou de ativo'},
-  ia_erro:{l:'Erro IA',d:'Falha na API Anthropic'},
-  resumo:{l:'Resumo diário',d:'Enviado ao encerrar'},
+const THEMES=[
+  {accent:'#00b4fc',accent2:'#00f5a0',bg:'#070b14',s1:'#0d1526',s2:'#111d35',s3:'#172347'},
+  {accent:'#ff6b35',accent2:'#ffd700',bg:'#0f0800',s1:'#1a1000',s2:'#261800',s3:'#332100'},
+  {accent:'#a855f7',accent2:'#ec4899',bg:'#09050f',s1:'#140d1f',s2:'#1c1230',s3:'#26183d'},
+  {accent:'#00e87a',accent2:'#84cc16',bg:'#050f08',s1:'#0a1f10',s2:'#0f2e18',s3:'#153d20'},
+  {accent:'#ff4757',accent2:'#ff9f43',bg:'#0f0505',s1:'#1f0a0a',s2:'#2e0f0f',s3:'#3d1515'},
+];
+let charts={}, bots=[], cur=0;
+
+function applyTheme(idx){
+  const t=THEMES[idx%THEMES.length];
+  const r=document.documentElement.style;
+  r.setProperty('--accent',t.accent);r.setProperty('--accent2',t.accent2);
+  r.setProperty('--bg',t.bg);r.setProperty('--s1',t.s1);
+  r.setProperty('--s2',t.s2);r.setProperty('--s3',t.s3);
+  document.body.style.background=t.bg;
+}
+
+function fmt(n,d=2){return Number(n).toLocaleString('pt-BR',{minimumFractionDigits:d,maximumFractionDigits:d})}
+
+function rb(r){
+  if(!r)return'';
+  if(r.includes('TAKE_PROFIT')||r.includes('take_profit'))return'<span class="bk btp">TP</span>';
+  if(r.includes('STOP_LOSS')||r.includes('stop_loss'))return'<span class="bk bsl">SL</span>';
+  if(r.includes('[FB]'))return'<span class="bk bfb">FB</span>';
+  return'<span class="bk bia">IA</span>';
+}
+
+const NOTIF_TYPES={
+  inicio:      {label:'Inicialização',   desc:'Bot iniciado/encerrado'},
+  compra:      {label:'Compra',          desc:'Ordem de compra executada'},
+  venda:       {label:'Venda',           desc:'Ordem de venda executada'},
+  stop_loss:   {label:'Stop-loss',       desc:'Stop-loss atingido'},
+  take_profit: {label:'Take-profit',     desc:'Take-profit atingido'},
+  par_troca:   {label:'Troca de par',    desc:'Scanner trocou o par ativo'},
+  ia_erro:     {label:'Erro IA',         desc:'Falha na API Anthropic'},
+  resumo:      {label:'Resumo',          desc:'Resumo ao encerrar'},
 };
-let bots=[],allOps=[],ovFilt='all';
 
-function fmt(n,d=2){return(+n||0).toLocaleString('pt-BR',{minimumFractionDigits:d,maximumFractionDigits:d})}
+function buildNotifPanel(b, idx){
+  const entries = Object.entries(NOTIF_TYPES).map(([key,info])=>{
+    const checked = b.notif_cfg?.[key]!==false;
+    return `<div class="notif-item">
+      <div>
+        <div class="notif-label">${info.label}</div>
+        <div class="notif-desc">${info.desc}</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="notif-${idx}-${key}" ${checked?'checked':''} onchange="saveNotif(${idx})">
+        <div class="toggle-track"></div>
+        <div class="toggle-thumb"></div>
+      </label>
+    </div>`;
+  }).join('');
+  return `<div class="notif-panel">
+    <div class="ch">
+      <div class="ct">NOTIFICAÇÕES TELEGRAM</div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--muted)">${b.tg_token?'✓ Token configurado':'✗ Sem token'}</div>
+    </div>
+    <div class="notif-grid">${entries}</div>
+    <div style="display:flex;align-items:center;margin-top:14px">
+      <button class="save-btn" onclick="saveNotif(${idx})">Salvar configurações</button>
+      <span class="save-msg" id="save-msg-${idx}">✓ Salvo!</span>
+    </div>
+  </div>`;
+}
 
-function sv(id,btn){
-  document.querySelectorAll('.ntab').forEach(t=>t.classList.remove('on'));
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
+async function saveTgAtivo(idx){
+  const ativo=document.getElementById(`tg-ativo-${idx}`)?.checked;
+  await fetch(`/api/tg_ativo/${idx}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ativo})});
+  // Desabilita/habilita grid de notificações
+  const grid=document.getElementById(`notif-grid-${idx}`);
+  if(grid) grid.style.opacity=ativo?'1':'0.4';
+  const msg=document.getElementById(`sv-${idx}`);
+  if(msg){msg.textContent=ativo?'✓ Telegram ativado!':'✓ Telegram desativado!';msg.style.display='inline';setTimeout(()=>msg.style.display='none',2000);}
+}
+
+async function saveNotif(idx){
+  const b=bots[idx];if(!b)return;
+  const cfg={};
+  Object.keys(NOTIF_TYPES).forEach(key=>{
+    const el=document.getElementById(`notif-${idx}-${key}`);
+    if(el) cfg[key]=el.checked;
+  });
+  await fetch(`/api/notif/${idx}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+  const msg=document.getElementById(`save-msg-${idx}`);
+  if(msg){msg.style.display='inline';setTimeout(()=>msg.style.display='none',2000);}
+}
+
+function buildPanel(b, idx){
+  return `<div class="panel" id="panel-${idx}">
+    <div class="stats">
+      <div class="st ${b.pnl>0?'g':b.pnl<0?'r':''}">
+        <div class="st-l">PNL TOTAL</div>
+        <div class="st-v" id="v-pnl-${idx}">$0.0000</div>
+        <div class="st-s" id="v-pnl-s-${idx}">—</div>
+      </div>
+      <div class="st g"><div class="st-l">MELHOR OP</div><div class="st-v g" id="v-best-${idx}">—</div><div class="st-s" id="v-best-s-${idx}">—</div></div>
+      <div class="st r"><div class="st-l">PIOR OP</div><div class="st-v r" id="v-worst-${idx}">—</div><div class="st-s" id="v-worst-s-${idx}">—</div></div>
+      <div class="st"><div class="st-l">WIN RATE</div><div class="st-v" id="v-wr-${idx}">—</div><div class="st-s" id="v-wr-s-${idx}">0W/0L</div></div>
+      <div class="st"><div class="st-l">SALDO USDT</div><div class="st-v b" id="v-usdt-${idx}">—</div><div class="st-s" id="v-ops-${idx}">0 ops</div></div>
+      <div class="st"><div class="st-l">POSIÇÃO</div><div class="st-v" id="v-pos-${idx}">NENHUMA</div><div class="st-s" id="v-pos-s-${idx}">—</div></div>
+    </div>
+    <div class="mid">
+      <div class="card">
+        <div class="ch"><div class="ct">PNL ACUMULADO</div><div class="ct" id="v-pair-${idx}" style="color:var(--accent)">—</div></div>
+        <div class="cw"><canvas id="ch-${idx}"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="ct" style="margin-bottom:10px">POSIÇÃO ABERTA</div>
+        <div id="pos-${idx}"><div class="pos-e">Aguardando sinal...</div></div>
+      </div>
+    </div>
+    <div class="ops-c">
+      <div class="ch">
+        <div class="ct">OPERAÇÕES</div>
+        <div class="op-tabs">
+          <button class="ot on" onclick="fops(${idx},'all',this)">TODAS</button>
+          <button class="ot" onclick="fops(${idx},'win',this)">GANHOS</button>
+          <button class="ot" onclick="fops(${idx},'loss',this)">PERDAS</button>
+        </div>
+      </div>
+      <div class="tw"><table>
+        <thead><tr><th>#</th><th>PAR</th><th>COMPRA</th><th>VENDA</th><th>QTD</th><th>CAPITAL</th><th>PNL</th><th>%</th><th>MOTIVO</th><th>DATA/HORA</th></tr></thead>
+        <tbody id="ops-${idx}"><tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px">Nenhuma operação ainda</td></tr></tbody>
+      </table></div>
+      <div class="os" id="os-${idx}"></div>
+    </div>
+    <div class="card">
+      <div class="ct">DESEMPENHO POR PAR</div>
+      <div class="pg" id="pg-${idx}"></div>
+    </div>
+    <div class="bot">
+      <div class="card">
+        <div class="ch"><div class="ct">SCANNER DE MERCADO</div><div class="ct" id="sc-ts-${idx}" style="color:var(--muted)">—</div></div>
+        <div id="sc-${idx}"></div>
+      </div>
+      <div class="card">
+        <div class="ch"><div class="ct">LOG EM TEMPO REAL</div><div class="ct" id="lc-${idx}" style="color:var(--muted)">0 linhas</div></div>
+        <div class="lw" id="lw-${idx}"></div>
+      </div>
+    </div>
+    ${buildNotifPanelHTML(idx)}
+  </div>`;
+}
+
+function buildNotifPanelHTML(idx){
+  const entries=Object.entries(NOTIF_TYPES).map(([key,info])=>`
+    <div class="notif-item">
+      <div><div class="notif-label">${info.label}</div><div class="notif-desc">${info.desc}</div></div>
+      <label class="toggle">
+        <input type="checkbox" id="notif-${idx}-${key}" checked onchange="saveNotif(${idx})">
+        <div class="toggle-track"></div><div class="toggle-thumb"></div>
+      </label>
+    </div>`).join('');
+  return `<div class="notif-panel">
+    <div class="ch"><div class="ct">NOTIFICAÇÕES TELEGRAM</div><div class="ct" id="tg-st-${idx}" style="color:var(--muted)">—</div></div>
+    <div class="notif-grid">${entries}</div>
+    <div style="display:flex;align-items:center;margin-top:14px">
+      <button class="save-btn" onclick="saveNotif(${idx})">Salvar</button>
+      <span class="save-msg" id="sv-${idx}">✓ Salvo!</span>
+    </div>
+  </div>`;
+}
+
+function fops(idx,f,btn){
+  document.querySelectorAll(`#panel-${idx} .ot`).forEach(b=>b.classList.remove('on'));
   btn.classList.add('on');
-  const el=document.getElementById('view-'+id);if(el)el.classList.add('on');
+  const tr=bots[idx]?.trades||[];
+  renderOps(idx,f==='all'?tr:tr.filter(t=>f==='win'?t.pnl>=0:t.pnl<0));
 }
 
-function sbadge(op){
-  if(op._open)return'<span class="st-badge st-open">● ABERTA</span>';
-  const r=(op.reason||'').toUpperCase();
-  if(r.includes('TAKE_PROFIT'))return'<span class="st-badge st-win st-tp">✓ TAKE PROFIT</span>';
-  if(r.includes('STOP_LOSS'))return'<span class="st-badge st-loss st-sl">✗ STOP LOSS</span>';
-  return(op.pnl||0)>=0?'<span class="st-badge st-win">✓ GANHO</span>':'<span class="st-badge st-loss">✗ PERDA</span>';
-}
-
-function rmotivo(r){
-  if(!r)return'—';const u=r.toUpperCase();
-  if(u.includes('STOP_LOSS'))return'<span style="color:var(--red);font-size:10px">SL</span>';
-  if(u.includes('TAKE_PROFIT'))return'<span style="color:var(--green);font-size:10px">TP</span>';
-  if(u.includes('[FB]'))return'<span style="color:var(--muted);font-size:10px">Tec.</span>';
-  return`<span style="color:var(--muted);font-size:10px">${r.slice(0,10)}</span>`;
-}
-
-function renderOpsTable(tbodyId, ops){
-  const tb=document.getElementById(tbodyId);if(!tb)return;
-  if(!ops?.length){tb.innerHTML=`<tr><td colspan="10" class="empty">Nenhuma operação ainda — o bot está aguardando sinais de compra</td></tr>`;return;}
-  tb.innerHTML=[...ops].reverse().map(op=>{
-    const pct=op.usdt_used>0?((op.pnl||0)/op.usdt_used*100).toFixed(2)+'%':'—';
-    const pc=(op.pnl||0)>=0?'pp':'pn';
-    const sym=(op.symbol||'').replace('USDT','').replace('-USDT','');
-    return`<tr class="${op._open?'tr-open':''}">
-      <td>${sbadge(op)}</td>
-      <td style="color:var(--muted);font-size:11px">${op._bot||b?.name||'—'}</td>
-      <td><span class="sym-badge">${sym}</span></td>
-      <td>$${fmt(op.entry||0,4)}</td>
-      <td>${op._open?'<span style="color:var(--amber)">em aberto</span>':'$'+fmt(op.exit||0,4)}</td>
-      <td style="color:var(--muted)">$${fmt(op.usdt_used||0)}</td>
-      <td class="${pc}">${op._open?'—':(op.pnl>=0?'+':'')+'$'+Math.abs(op.pnl||0).toFixed(4)}</td>
-      <td class="${pc}">${op._open?'—':pct}</td>
-      <td>${rmotivo(op.reason)}</td>
-      <td style="color:var(--dim);font-size:10px">${(op.close||op.time||'—').slice(11,16)}</td>
+function renderOps(idx,trades){
+  const tb=document.getElementById(`ops-${idx}`);if(!tb)return;
+  if(!trades||!trades.length){
+    tb.innerHTML='<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px">Nenhuma operação ainda</td></tr>';return;
+  }
+  tb.innerHTML=[...trades].reverse().map((t,i)=>{
+    const pct=t.usdt_used>0?(t.pnl/t.usdt_used*100).toFixed(2)+'%':'—';
+    const c=t.pnl>=0?'pp':'pn';
+    return`<tr>
+      <td style="color:var(--muted)">${trades.length-i}</td>
+      <td><span class="bk bsym">${(t.symbol||'BTC').replace('USDT','')}</span></td>
+      <td>$${fmt(t.entry,4)}</td>
+      <td>${t.exit>0?'$'+fmt(t.exit,4):'<span style="color:var(--amber)">aberta</span>'}</td>
+      <td style="color:var(--muted)">${t.qty||'—'}</td>
+      <td style="color:var(--muted)">$${fmt(t.usdt_used||0)}</td>
+      <td class="${c}">${t.pnl>=0?'+':''}$${Number(t.pnl).toFixed(4)}</td>
+      <td class="${c}">${pct}</td>
+      <td>${rb(t.reason)}</td>
+      <td style="color:var(--muted);font-size:8px">${(t.close||'').substring(0,19)}</td>
     </tr>`;
   }).join('');
 }
 
-function ovf(f,btn){
-  document.querySelectorAll('#view-ov .fb').forEach(b=>b.classList.remove('on'));
-  btn.classList.add('on');ovFilt=f;
-  const ops=f==='all'?allOps:f==='open'?allOps.filter(o=>o._open):
-    f==='win'?allOps.filter(o=>!o._open&&(o.pnl||0)>=0):allOps.filter(o=>!o._open&&(o.pnl||0)<0);
-  renderOpsTable('ov-ops',ops);
-}
-
-function updOv(data){
-  const tp=data.reduce((a,b)=>a+(b.pnl||0),0);
-  const at=data.filter(b=>b.bot_running).length;
-  const ab=data.filter(b=>b.position).length;
-  const w=data.reduce((a,b)=>a+(b.wins||0),0),l=data.reduce((a,b)=>a+(b.losses||0),0);
-  const tot=w+l;const wr=tot>0?Math.round(w/tot*100):null;
-
-  const pe=document.getElementById('ov-pnl');
-  pe.textContent=(tp>=0?'+':'')+'$'+Math.abs(tp).toFixed(4);
-  pe.className='metric-value '+(tp>0?'mv-pos':tp<0?'mv-neg':'');
-  const pm=document.getElementById('m-pnl');
-  pm.className='metric '+(tp>0?'pos':tp<0?'neg':'');
-  document.getElementById('ov-ps').textContent=data.length+' conta(s) combinadas';
-  document.getElementById('ov-bots').textContent=at+'/'+data.length;
-  document.getElementById('ov-bs').textContent=data.reduce((a,b)=>a+(b.trades||[]).length,0)+' operações realizadas';
-  document.getElementById('ov-pos').textContent=ab;
-  document.getElementById('ov-pos-s').textContent=ab?ab+' posição(ões) em aberto':'nenhuma posição aberta';
-  const we=document.getElementById('ov-wr');
-  we.textContent=wr!==null?wr+'%':'—';
-  we.style.color=wr!==null&&wr>=55?'var(--green)':wr!==null&&wr<45?'var(--red)':'var(--blue)';
-  document.getElementById('ov-wrs').textContent=`${w} ganhos / ${l} perdas`;
-
-  document.getElementById('ov-accs').innerHTML=data.map(b=>{
-    const ex=(b.exchange||'binance').toLowerCase();
-    const xb=`<span class="xbadge ${ex==='okx'?'xb-okx':'xb-bnb'}">${ex.toUpperCase()}</span>`;
-    const pnl=b.pnl||0;const wb=b.wins||0;const lb=b.losses||0;const tb2=wb+lb;
-    const wr2=tb2>0?Math.round(wb/tb2*100):null;
-    const posH=b.position?`<div class="pos-alert">
-      <span class="pos-sym">${(b.position.symbol||'').replace('USDT','').replace('-USDT','')}/USDT</span>
-      <span class="pos-detail">entrada $${fmt(b.position.entry_price||0,2)} · capital $${fmt(b.position.usdt_used||0)}</span>
-    </div>`:'';
-    return`<div class="bc">
-      <div class="bc-head">
-        <div>
-          <div class="bc-name">${b.emoji||'🤖'} ${b.name} ${xb}</div>
-          <div class="bc-sub">${b.active_symbol||'aguardando scanner...'}</div>
-        </div>
-        <span class="pill ${b.bot_running?'pill-on':'pill-off'}">${b.bot_running?'● ATIVO':'○ PARADO'}</span>
-      </div>
-      <div class="bc-metrics">
-        <div class="bc-m" data-tip="Saldo de USDT disponível para novas compras nesta conta">
-          <div class="bc-ml">USDT livre</div>
-          <div class="bc-mv" style="color:${(b.usdt||0)<10?'var(--red)':'var(--text)'}">$${fmt(b.usdt||0)}</div>
-        </div>
-        <div class="bc-m" data-tip="Lucro ou Prejuízo total desta conta">
-          <div class="bc-ml">PnL</div>
-          <div class="bc-mv" style="color:${pnl>0?'var(--green)':pnl<0?'var(--red)':'var(--text)'}">${pnl>=0?'+':''}$${pnl.toFixed(3)}</div>
-        </div>
-        <div class="bc-m" data-tip="Win Rate: percentual de operações com lucro. Acima de 55% é bom.">
-          <div class="bc-ml">Win rate</div>
-          <div class="bc-mv" style="color:${wr2!==null&&wr2>=55?'var(--green)':wr2!==null&&wr2<45?'var(--red)':'var(--text)'}">${wr2!==null?wr2+'%':'—'}</div>
-        </div>
-        <div class="bc-m" data-tip="Total de operações já encerradas (compra + venda)">
-          <div class="bc-ml">Operações</div>
-          <div class="bc-mv">${tb2}</div>
-        </div>
-      </div>
-      ${posH}
-    </div>`;
-  }).join('');
-
-  allOps=[];
-  data.forEach(b=>{
-    (b.trades||[]).forEach(t=>allOps.push({...t,_bot:b.name,_open:false}));
-    if(b.position)allOps.push({
-      symbol:b.position.symbol,entry:b.position.entry_price,
-      qty:b.position.qty,usdt_used:b.position.usdt_used||0,pnl:0,
-      _bot:b.name,_open:true,time:'',reason:''
-    });
+function initChart(id){
+  const ctx=document.getElementById(id);if(!ctx)return;
+  charts[id]=new Chart(ctx.getContext('2d'),{
+    type:'line',
+    data:{labels:[],datasets:[
+      {data:[],borderColor:'#00f5a0',backgroundColor:'rgba(0,245,160,.05)',borderWidth:1.5,pointRadius:2,fill:true,tension:.4,label:'Acum.'},
+      {data:[],borderColor:'#00b4fc',backgroundColor:'transparent',borderWidth:1,pointRadius:2,fill:false,tension:0,label:'Por op'},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:true,labels:{color:'#6b7fa8',font:{family:'JetBrains Mono',size:8},boxWidth:8}}},
+      scales:{
+        x:{ticks:{color:'#6b7fa8',font:{family:'JetBrains Mono',size:7}},grid:{color:'rgba(255,255,255,.04)'}},
+        y:{ticks:{color:'#6b7fa8',font:{family:'JetBrains Mono',size:7},callback:v=>'$'+v.toFixed(3)},grid:{color:'rgba(255,255,255,.04)'}}
+      }
+    }
   });
-  allOps.sort((a,b)=>(a.close||a.time||'')>(b.close||b.time||'')?1:-1);
-  document.getElementById('ov-cnt').textContent=allOps.length+' operações';
-  const ab2=document.querySelector('#view-ov .fb.on');if(ab2)ab2.click();else renderOpsTable('ov-ops',allOps);
 }
 
-function buildBotView(b,idx){
-  const notifHtml=Object.entries(NOTIF).map(([k,info])=>`
-    <div class="ni">
-      <div><div class="ni-text">${info.l}</div><div class="ni-desc">${info.d}</div></div>
-      <label class="tog"><input type="checkbox" id="nf-${idx}-${k}" onchange="sn(${idx})">
-        <div class="tog-t"></div><div class="tog-k"></div></label>
-    </div>`).join('');
+function updatePanel(d,idx){
+  bots[idx]=d;
+  const T=THEMES[idx%THEMES.length];
 
-  return`<div id="view-bot${idx}" class="view" style="padding:20px">
-    <div class="bot-layout">
-      <div>
-        <!-- Posição atual — informação mais importante -->
-        <div class="section">Posição Atual</div>
-        <div id="pos-box-${idx}"></div>
+  // Par ativo
+  const pe=document.getElementById(`v-pair-${idx}`);if(pe)pe.textContent=d.active_symbol||'—';
 
-        <!-- Indicadores técnicos -->
-        <div class="section">Indicadores Técnicos</div>
-        <div class="ind-grid" id="ind-${idx}">
-          <div class="ind-card"><div class="ind-label" data-tip="RSI (Índice de Força Relativa): mede se o ativo está sobrecomprado ou sobrevendido. Abaixo de 30 = muito barato (possível compra), Acima de 70 = muito caro (possível venda).">RSI <span class="hi">?</span></div><div class="ind-value" id="iv-rsi-${idx}">—</div></div>
-          <div class="ind-card"><div class="ind-label" data-tip="MACD: indica a direção da tendência. BULL = tendência de alta (favorável para compra), BEAR = tendência de baixa (favorável para venda).">MACD <span class="hi">?</span></div><div class="ind-value" id="iv-macd-${idx}">—</div></div>
-          <div class="ind-card"><div class="ind-label" data-tip="BB% (Bandas de Bollinger): posição do preço dentro das bandas. 0% = extremo inferior (possível compra), 100% = extremo superior (possível venda). Valores além de 100% indicam movimento muito forte.">BB% <span class="hi">?</span></div><div class="ind-value" id="iv-bb-${idx}">—</div></div>
-          <div class="ind-card"><div class="ind-label" data-tip="Tendência de preço calculada pela média móvel de 50 períodos. ALTA = preço acima da média (momentum positivo), BAIXA = preço abaixo (momentum negativo).">TEND <span class="hi">?</span></div><div class="ind-value" id="iv-tend-${idx}">—</div></div>
-        </div>
+  // Ticker destaque
+  document.querySelectorAll('.ti').forEach(e=>e.classList.remove('hi'));
+  if(d.active_symbol){const te=document.getElementById('tick-'+d.active_symbol);if(te)te.classList.add('hi')}
 
-        <!-- Estatísticas -->
-        <div class="section">Estatísticas</div>
-        <div class="stats-row">
-          <div class="stat"><div class="stat-label" data-tip="Lucro/Prejuízo acumulado de todas as operações encerradas desta conta.">PNL TOTAL <span class="hi">?</span></div><div class="stat-value" id="sv-pnl-${idx}">—</div></div>
-          <div class="stat"><div class="stat-label" data-tip="Saldo de USDT disponível para novas compras. Abaixo de $10 o bot não consegue operar.">USDT LIVRE <span class="hi">?</span></div><div class="stat-value sv-blue" id="sv-usdt-${idx}">—</div></div>
-          <div class="stat"><div class="stat-label" data-tip="Win Rate: percentual de operações com lucro. Ex: 60% significa que 6 em cada 10 operações deram lucro.">WIN RATE <span class="hi">?</span></div><div class="stat-value" id="sv-wr-${idx}">—</div></div>
-          <div class="stat"><div class="stat-label" data-tip="Total de operações já encerradas com lucro (wins) e prejuízo (losses).">W / L <span class="hi">?</span></div><div class="stat-value" id="sv-wl-${idx}">—</div></div>
-          <div class="stat"><div class="stat-label" data-tip="Melhor operação já realizada nesta conta.">MELHOR OP <span class="hi">?</span></div><div class="stat-value sv-pos" id="sv-best-${idx}">—</div></div>
-          <div class="stat"><div class="stat-label" data-tip="Pior operação já realizada nesta conta.">PIOR OP <span class="hi">?</span></div><div class="stat-value sv-neg" id="sv-worst-${idx}">—</div></div>
-        </div>
+  // PnL
+  const pnl=d.pnl||0;
+  const pe2=document.getElementById(`v-pnl-${idx}`);
+  if(pe2){pe2.textContent=(pnl>=0?'+':'')+'$'+pnl.toFixed(4);pe2.className='st-v '+(pnl>0?'g':pnl<0?'r':'');}
 
-        <!-- Operações -->
-        <div class="section">Operações</div>
-        <div class="ops-wrap" style="margin-bottom:14px">
-          <div class="ops-head">
-            <div><span class="ops-title">Histórico</span><span class="ops-cnt" id="ops-cnt-${idx}" style="margin-left:10px">—</span></div>
-            <div class="filter-row">
-              <button class="fb on" onclick="bfilt(${idx},'all',this)">TODAS</button>
-              <button class="fb" onclick="bfilt(${idx},'win',this)">GANHOS</button>
-              <button class="fb" onclick="bfilt(${idx},'loss',this)">PERDAS</button>
-            </div>
-          </div>
-          <div class="tw"><table>
-            <thead><tr>
-              <th>#</th><th data-tip="Par de negociação">PAR</th>
-              <th data-tip="Preço de compra">COMPRA</th>
-              <th data-tip="Preço de venda">VENDA</th>
-              <th data-tip="Quantidade comprada">QTD</th>
-              <th data-tip="Capital investido em USDT">CAPITAL</th>
-              <th data-tip="Lucro ou Prejuízo em dólares">PNL $</th>
-              <th data-tip="Retorno percentual">PNL %</th>
-              <th data-tip="SL=Stop Loss (saiu por limite de perda), TP=Take Profit (saiu por meta de lucro), Tec=decisão técnica">MOTIVO</th>
-              <th>DATA/HORA</th>
-            </tr></thead>
-            <tbody id="bops-${idx}"></tbody>
-          </table></div>
-        </div>
+  // WR
+  const w=d.wins||0,l=d.losses||0,tot=w+l;
+  const wr=tot>0?Math.round(w/tot*100):null;
+  const wre=document.getElementById(`v-wr-${idx}`);
+  if(wre){wre.textContent=wr!==null?wr+'%':'—';wre.className='st-v '+(wr>=55?'g':wr!==null&&wr<45?'r':'a');}
+  const wrs=document.getElementById(`v-wr-s-${idx}`);if(wrs)wrs.textContent=w+'W/'+l+'L';
 
-        <!-- Carteira -->
-        <div class="section">Carteira</div>
-        <div class="wallet-wrap" id="wallet-${idx}">
-          <div class="wallet-loading">Carregando carteira...</div>
-        </div>
+  const ue=document.getElementById(`v-usdt-${idx}`);if(ue)ue.textContent=d.usdt?'$'+fmt(d.usdt):'—';
+  const oe=document.getElementById(`v-ops-${idx}`);if(oe)oe.textContent=(d.trades||[]).length+' ops';
 
-        <!-- Scanner -->
-        <div class="section">Scanner de Mercado</div>
-        <div class="scanner-wrap">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-            <span style="font-size:10px;font-weight:600;letter-spacing:.1em;color:var(--muted)" data-tip="O scanner analisa todos os pares configurados e escolhe o melhor para operar, baseado em volume, volatilidade e variação de preço. Maior score = melhor oportunidade.">PARES MONITORADOS <span class="hi">?</span></span>
-            <span style="font-size:10px;color:var(--dim);font-family:var(--mono)" id="sc-ts-${idx}">—</span>
-          </div>
-          <div id="sc-${idx}"></div>
-        </div>
+  // Melhor/pior
+  const tr=d.trades||[];
+  const tw=tr.filter(t=>t.pnl>0),tl=tr.filter(t=>t.pnl<0);
+  const best=tw.length?tw.reduce((a,b)=>b.pnl>a.pnl?b:a):null;
+  const worst=tl.length?tl.reduce((a,b)=>b.pnl<a.pnl?b:a):null;
+  const bv=document.getElementById(`v-best-${idx}`);if(bv)bv.textContent=best?'+$'+best.pnl.toFixed(4):'—';
+  const bs=document.getElementById(`v-best-s-${idx}`);if(bs)bs.textContent=best?(best.symbol||'').replace('USDT',''):'—';
+  const wv=document.getElementById(`v-worst-${idx}`);if(wv)wv.textContent=worst?'$'+worst.pnl.toFixed(4):'—';
+  const ws=document.getElementById(`v-worst-s-${idx}`);if(ws)ws.textContent=worst?(worst.symbol||'').replace('USDT',''):'—';
 
-        <!-- Log -->
-        <div class="section">Log em Tempo Real</div>
-        <div class="log-wrap">
-          <div class="log-head">
-            <span style="font-size:10px;font-weight:600;letter-spacing:.1em;color:var(--muted)">ATIVIDADE DO BOT</span>
-            <span style="font-size:10px;color:var(--dim);font-family:var(--mono)" id="lc-${idx}">0 linhas</span>
-          </div>
-          <div class="log-body" id="lw-${idx}"></div>
-        </div>
-      </div>
-
-      <!-- Sidebar -->
-      <div class="sidebar">
-        <!-- Desempenho por par -->
-        <div class="side-card">
-          <div class="side-head" data-tip="PnL acumulado por cada par de negociação. Mostra quais ativos estão dando mais resultado.">Por par <span class="hi">?</span></div>
-          <div class="side-body"><div class="par-list" id="pg-${idx}"><span style="color:var(--dim);font-size:12px">Sem dados ainda</span></div></div>
-        </div>
-
-        <!-- Notificações -->
-        <div class="side-card">
-          <div class="side-head">Notificações Telegram</div>
-          <div class="side-body">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--border)">
-              <span style="font-size:12px" id="tg-st-${idx}">—</span>
-              <label class="tog"><input type="checkbox" id="tg-a-${idx}" onchange="sta(${idx})">
-                <div class="tog-t"></div><div class="tog-k"></div></label>
-            </div>
-            <div class="notif-grid" id="ng-${idx}">${notifHtml}</div>
-            <button class="save-btn" onclick="sn(${idx})">Salvar configurações</button>
-            <div class="sm" id="sm-${idx}">✓ Salvo!</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>`;
-}
-
-function updBotPos(b,idx){
-  const el=document.getElementById('pos-box-'+idx);if(!el)return;
-  if(!b.position){
-    el.innerHTML='<div class="no-pos">Nenhuma posição aberta — bot aguardando sinal de compra</div>';
-    return;
+  // Posição
+  const pe3=document.getElementById(`v-pos-${idx}`);
+  const pd=document.getElementById(`pos-${idx}`);
+  if(d.position){
+    const pct=d.price?((d.price-d.position.entry_price)/d.position.entry_price*100):0;
+    const pc=pct>=0?'g':'r';
+    const prog=Math.min(100,Math.max(0,(pct+(d.stop_loss||.005)*100)/((d.take_profit||.01)+(d.stop_loss||.005))*100));
+    if(pe3){pe3.textContent=d.position.symbol||'ABERTA';pe3.className='st-v g';}
+    const ps=document.getElementById(`v-pos-s-${idx}`);if(ps)ps.textContent='entrada $'+fmt(d.position.entry_price,4);
+    if(pd)pd.innerHTML=`<div>
+      <div class="pos-h"><div class="pos-sym">${d.position.symbol||'—'}</div><div class="pos-pnl ${pc}">${pct>=0?'+':''}${pct.toFixed(2)}%</div></div>
+      <div class="pr"><span class="pk">Entrada</span><span class="pv">$${fmt(d.position.entry_price,4)}</span></div>
+      <div class="pr"><span class="pk">Preço atual</span><span class="pv" style="color:var(--accent)">$${d.price?fmt(d.price,4):'—'}</span></div>
+      <div class="pr"><span class="pk">Quantidade</span><span class="pv">${d.position.qty||'—'}</span></div>
+      <div class="pr"><span class="pk">Capital</span><span class="pv">$${fmt(d.position.usdt_used||0)}</span></div>
+      <div class="pr"><span class="pk">Stop-loss</span><span class="pv" style="color:var(--red)">$${fmt(d.position.entry_price*(1-(d.stop_loss||.005)),4)}</span></div>
+      <div class="pr"><span class="pk">Take-profit</span><span class="pv" style="color:var(--green)">$${fmt(d.position.entry_price*(1+(d.take_profit||.01)),4)}</span></div>
+      <div class="slbar"><div class="slf" style="width:${prog}%"></div></div>
+    </div>`;
+  }else{
+    if(pe3){pe3.textContent='NENHUMA';pe3.className='st-v';}
+    const ps=document.getElementById(`v-pos-s-${idx}`);if(ps)ps.textContent='—';
+    if(pd)pd.innerHTML='<div class="pos-e">Aguardando sinal...</div>';
   }
-  const p=b.position;const curr=b.price||p.entry_price;
-  const pct=p.entry_price>0?((curr-p.entry_price)/p.entry_price*100):0;
-  const pnl=(pct/100*(p.usdt_used||0));
-  const sl=b.stop_loss||0.005;const tp=b.take_profit||0.010;
-  const pColor=pct>=0?'var(--green)':'var(--red)';
-  el.innerHTML=`<div class="pos-box">
-    <div class="pos-box-head">
-      <div>
-        <div class="pos-box-sym">${(p.symbol||'').replace('USDT','').replace('-USDT','')}/USDT</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px;font-family:var(--mono)">POSIÇÃO EM ABERTO</div>
-      </div>
-      <div style="text-align:right">
-        <div style="font-family:var(--mono);font-size:20px;font-weight:600;color:${pColor}">${pct>=0?'+':''}${pct.toFixed(2)}%</div>
-        <div style="font-family:var(--mono);font-size:13px;font-weight:600;color:${pColor}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(4)}</div>
-      </div>
-    </div>
-    <div class="pos-box-body">
-      <div class="pos-row">
-        <span class="pos-key" data-tip="Preço no qual o bot comprou o ativo">Preço de compra <span class="hi">?</span></span>
-        <span class="pos-val">$${fmt(p.entry_price,4)}</span>
-      </div>
-      <div class="pos-row">
-        <span class="pos-key" data-tip="Preço atual do ativo no mercado">Preço atual <span class="hi">?</span></span>
-        <span class="pos-val" style="color:${pColor}">$${fmt(curr,4)}</span>
-      </div>
-      <div class="pos-row">
-        <span class="pos-key" data-tip="Quanto foi investido nesta operação em dólares">Capital investido <span class="hi">?</span></span>
-        <span class="pos-val">$${fmt(p.usdt_used||0)}</span>
-      </div>
-      <div class="pos-row">
-        <span class="pos-key" data-tip="Quantidade do ativo comprado">Quantidade <span class="hi">?</span></span>
-        <span class="pos-val">${p.qty||'—'}</span>
-      </div>
-      <div class="pos-row" style="background:var(--red-bg)">
-        <span class="pos-key" style="color:var(--red)" data-tip="Stop Loss: se o preço cair até este valor, o bot vende automaticamente para limitar a perda. Configurado em ${(sl*100).toFixed(1)}% de queda.">Stop Loss -${(sl*100).toFixed(1)}% <span class="hi">?</span></span>
-        <span class="pos-val" style="color:var(--red)">$${fmt(p.entry_price*(1-sl),4)}</span>
-      </div>
-      <div class="pos-row" style="background:var(--green-bg)">
-        <span class="pos-key" style="color:var(--green)" data-tip="Take Profit: se o preço subir até este valor, o bot vende automaticamente para garantir o lucro. Configurado em ${(tp*100).toFixed(1)}% de alta.">Take Profit +${(tp*100).toFixed(1)}% <span class="hi">?</span></span>
-        <span class="pos-val" style="color:var(--green)">$${fmt(p.entry_price*(1+tp),4)}</span>
-      </div>
-    </div>
-  </div>`;
-}
-
-function updBotPanel(b,idx){
-  updBotPos(b,idx);
-
-  // Indicadores
-  if(b.rsi!=null){
-    const rsiC=b.rsi<35?'var(--green)':b.rsi>65?'var(--red)':'var(--text)';
-    const macdC=b.macd_signal==='bullish'?'var(--green)':'var(--red)';
-    const bbC=b.bb_pct<25?'var(--green)':b.bb_pct>75?'var(--red)':'var(--text)';
-    const tendC=b.trend==='alta'?'var(--green)':'var(--red)';
-    const rsi=document.getElementById('iv-rsi-'+idx);if(rsi){rsi.textContent=b.rsi;rsi.style.color=rsiC;}
-    const macd=document.getElementById('iv-macd-'+idx);if(macd){macd.textContent=b.macd_signal==='bullish'?'BULL':'BEAR';macd.style.color=macdC;}
-    const bb=document.getElementById('iv-bb-'+idx);if(bb){bb.textContent=b.bb_pct+'%';bb.style.color=bbC;}
-    const tend=document.getElementById('iv-tend-'+idx);if(tend){tend.textContent=b.trend==='alta'?'↑ ALTA':'↓ BAIXA';tend.style.color=tendC;}
-  }
-
-  // Stats
-  const pnl=b.pnl||0;const pe=document.getElementById('sv-pnl-'+idx);
-  if(pe){pe.textContent=(pnl>=0?'+':'')+'$'+Math.abs(pnl).toFixed(4);pe.className='stat-value '+(pnl>0?'sv-pos':pnl<0?'sv-neg':'');}
-  const ue=document.getElementById('sv-usdt-'+idx);
-  if(ue){const usdt=b.usdt||0;ue.textContent='$'+fmt(usdt);ue.style.color=usdt<10?'var(--red)':'var(--blue)';}
-  const tot=(b.wins||0)+(b.losses||0);const wr=tot>0?Math.round(b.wins/tot*100):null;
-  const wre=document.getElementById('sv-wr-'+idx);
-  if(wre){wre.textContent=wr!==null?wr+'%':'—';wre.style.color=wr>=55?'var(--green)':wr!==null&&wr<45?'var(--red)':'var(--text)';}
-  const wle=document.getElementById('sv-wl-'+idx);if(wle)wle.textContent=`${b.wins||0} / ${b.losses||0}`;
-  const best=(b.trades||[]).filter(t=>t.pnl>0).sort((a,b)=>b.pnl-a.pnl)[0];
-  const worst=(b.trades||[]).filter(t=>t.pnl<0).sort((a,b)=>a.pnl-b.pnl)[0];
-  const be=document.getElementById('sv-best-'+idx);if(be)be.textContent=best?'+$'+best.pnl.toFixed(4):'—';
-  const we=document.getElementById('sv-worst-'+idx);if(we)we.textContent=worst?'-$'+Math.abs(worst.pnl).toFixed(4):'—';
 
   // Operações
-  const cnt=document.getElementById('ops-cnt-'+idx);if(cnt)cnt.textContent=(b.trades||[]).length+' operações';
-  const bopsActive=document.querySelector(`#view-bot${idx} .fb.on`);
-  if(bopsActive)bopsActive.click();else renderBotOps(idx,'all');
+  renderOps(idx,tr);
+  const os=document.getElementById(`os-${idx}`);
+  if(os&&tr.length>0){
+    const tp=tr.reduce((a,t)=>a+t.pnl,0);
+    const aw=tw.length?tw.reduce((a,t)=>a+t.pnl,0)/tw.length:0;
+    const al=tl.length?tl.reduce((a,t)=>a+t.pnl,0)/tl.length:0;
+    os.innerHTML=`
+      <div class="osi">Total: <b class="${tp>=0?'pp':'pn'}">${tp>=0?'+':''}$${tp.toFixed(4)}</b></div>
+      <div class="osi">Ganho médio: <b class="pp">+$${aw.toFixed(4)}</b></div>
+      <div class="osi">Perda média: <b class="pn">$${al.toFixed(4)}</b></div>
+      <div class="osi">Ops: <b style="color:var(--accent)">${tr.length}</b></div>
+      <div class="osi">WR: <b class="${wr>=55?'pp':wr!==null&&wr<45?'pn':''}">${wr!==null?wr+'%':'—'}</b></div>`;
+  }
+
+  // Perf por par
+  const pge=document.getElementById(`pg-${idx}`);
+  if(pge){
+    const pm={};
+    tr.forEach(t=>{
+      const s=(t.symbol||'BTCUSDT').replace('USDT','');
+      if(!pm[s])pm[s]={ops:0,wins:0,pnl:0,best:-Infinity,worst:Infinity};
+      pm[s].ops++;pm[s].pnl+=t.pnl;if(t.pnl>=0)pm[s].wins++;
+      if(t.pnl>pm[s].best)pm[s].best=t.pnl;if(t.pnl<pm[s].worst)pm[s].worst=t.pnl;
+    });
+    pge.innerHTML=['BTC','ETH','BNB','SOL','XRP'].map(p=>{
+      const s=pm[p];const wr2=s?Math.round(s.wins/s.ops*100):null;
+      return`<div class="pb"><div class="pbn">${p}</div>${s?`
+        <div class="pbr"><span class="pbk">Ops</span><span class="pbv">${s.ops}</span></div>
+        <div class="pbr"><span class="pbk">WR</span><span class="pbv" style="color:${wr2>=55?'var(--green)':wr2<45?'var(--red)':'var(--amber)'}">${wr2}%</span></div>
+        <div class="pbr"><span class="pbk">PnL</span><span class="pbv" style="color:${s.pnl>=0?'var(--green)':'var(--red)'}">${s.pnl>=0?'+':''}$${s.pnl.toFixed(3)}</span></div>
+        <div class="pbr"><span class="pbk">Melhor</span><span class="pbv pp">+$${s.best===Infinity?'0.000':s.best.toFixed(3)}</span></div>
+        <div class="pbr"><span class="pbk">Pior</span><span class="pbv pn">$${s.worst===-Infinity?'0.000':s.worst.toFixed(3)}</span></div>`
+        :'<div class="pbr"><span class="pbk" style="font-size:8px">sem ops</span></div>'}</div>`;
+    }).join('');
+  }
+
+  // Gráfico
+  const cid=`ch-${idx}`;
+  if(charts[cid]&&tr.length>0){
+    let acc=0;const lb=[],vl=[],vp=[];
+    tr.forEach((t,i)=>{acc+=t.pnl;lb.push('#'+(i+1));vl.push(parseFloat(acc.toFixed(4)));vp.push(parseFloat(t.pnl.toFixed(4)));});
+    charts[cid].data.labels=lb;
+    charts[cid].data.datasets[0].data=vl;
+    charts[cid].data.datasets[1].data=vp;
+    const T2=THEMES[idx%THEMES.length];
+    charts[cid].data.datasets[0].borderColor=acc>=0?T2.accent2:T2.accent;
+    charts[cid].data.datasets[0].backgroundColor=acc>=0?'rgba(0,245,160,.05)':'rgba(255,71,87,.05)';
+    charts[cid].data.datasets[1].borderColor=T2.accent;
+    charts[cid].update('none');
+  }
 
   // Scanner
-  const sc=document.getElementById('sc-'+idx);
-  if(sc&&b.scanner?.length){
-    const mx=Math.max(...b.scanner.map(s=>s.score),1);
-    sc.innerHTML=b.scanner.map(s=>{
-      const best2=s.symbol===b.active_symbol;
-      const cc=s.change>=0?'var(--green)':'var(--red)';
-      return`<div class="sc-row">
-        <div class="sc-sym ${best2?'sc-best':''}">${best2?'★ ':'  '}${s.symbol}</div>
-        <div class="sc-bar-wrap"><div class="sc-bar" style="width:${(s.score/mx*100).toFixed(0)}%"></div></div>
-        <div class="sc-score">${s.score}</div>
-        <div class="sc-chg" style="color:${cc}">${s.change>=0?'+':''}${s.change}%</div>
-      </div>`;}).join('');
-    const ts=document.getElementById('sc-ts-'+idx);if(ts)ts.textContent=b.scan_time?b.scan_time.slice(11,19):'—';
+  const sce=document.getElementById(`sc-${idx}`);
+  if(sce&&d.scanner&&d.scanner.length>0){
+    const ts=document.getElementById(`sc-ts-${idx}`);if(ts)ts.textContent=d.scan_time||'';
+    const ms=Math.max(...d.scanner.map(s=>s.score));
+    sce.innerHTML=d.scanner.map(s=>{
+      const ib=s.score===ms,ia=s.symbol===d.active_symbol;
+      const pc=s.change>=0?'up':'dn';
+      return`<div class="sr">
+        <div class="ss" style="color:${ib?'var(--green)':'var(--text)'}">${ia?'★ ':''}${s.symbol.replace('USDT','')}</div>
+        <div><div class="sb-w"><div class="sb ${ib?'best':''}" style="width:${s.score}%"></div></div></div>
+        <div class="sn ${pc}">${s.change>=0?'+':''}${s.change}%</div>
+        <div class="sn" style="color:var(--muted)">${s.volume}M</div>
+        <div class="sn" style="color:var(--muted)">${s.score.toFixed(1)}</div>
+      </div>`;
+    }).join('');
   }
 
   // Log
-  const lwe=document.getElementById('lw-'+idx);
-  if(lwe&&b.logs?.length){
-    const lce=document.getElementById('lc-'+idx);if(lce)lce.textContent=b.logs.length+' linhas';
+  const lwe=document.getElementById(`lw-${idx}`);
+  if(lwe&&d.logs&&d.logs.length>0){
+    const lce=document.getElementById(`lc-${idx}`);if(lce)lce.textContent=d.logs.length+' linhas';
     const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    lwe.innerHTML=b.logs.slice(-100).reverse().map(l=>{
+    lwe.innerHTML=d.logs.slice(-100).reverse().map(l=>{
       let c='ll';
       if(l.includes('Comprado'))c+=' buy';
       else if(l.includes('Fechado')||l.includes('PnL:'))c+=' sell';
       else if(l.includes('Scanner')||l.includes('Melhor:'))c+=' scan';
-      else if(l.includes('[IA]')||l.includes('[OKX]')||l.includes('[BINANCE]'))c+=' ia';
-      else if(l.includes('WARNING')||l.includes('[TOR]'))c+=' warn';
-      else if(l.includes('ERROR'))c+=' err';
-      return`<div class="${c}">${esc(l)}</div>`;}).join('');
+      else if(l.includes('[IA]')||l.includes('[ECON]')||l.includes('[TOR]'))c+=' ia';
+      else if(l.includes('WARNING')||l.includes('[FB]'))c+=' warn';
+      else if(l.includes('ERROR')||l.includes('[ERRO]'))c+=' err';
+      return`<div class="${c}">${esc(l)}</div>`;
+    }).join('');
+    lwe.scrollTop=0;
   }
 
-  // Desempenho por par
-  const pg=document.getElementById('pg-'+idx);
-  if(pg){
-    const bp={};(b.trades||[]).forEach(t=>{const p=t.symbol||'?';if(!bp[p])bp[p]={pnl:0,cnt:0};bp[p].pnl+=t.pnl||0;bp[p].cnt++;});
-    const ps=Object.entries(bp).sort((a,b)=>b[1].pnl-a[1].pnl);
-    pg.innerHTML=ps.length?ps.map(([s,d])=>`<div class="par-item">
-      <div>
-        <div class="par-sym">${s.replace('USDT','').replace('-USDT','')}</div>
-        <div class="par-cnt">${d.cnt} operação${d.cnt!==1?'s':''}</div>
-      </div>
-      <div class="par-pnl" style="color:${d.pnl>=0?'var(--green)':'var(--red)'}">${d.pnl>=0?'+':''}$${d.pnl.toFixed(4)}</div>
-    </div>`).join(''):'<span style="color:var(--dim);font-size:12px">Sem dados ainda</span>';
+  // Notificações estado
+  const tgAtivo=document.getElementById(`tg-ativo-${idx}`);
+  if(tgAtivo) tgAtivo.checked=d.tg_ativo!==false;
+  const grid=document.getElementById(`notif-grid-${idx}`);
+  if(grid) grid.style.opacity=d.tg_ativo!==false?'1':'0.4';
+  if(d.notif_cfg){
+    Object.keys(NOTIF_TYPES).forEach(key=>{
+      const el=document.getElementById(`notif-${idx}-${key}`);
+      if(el) el.checked=d.notif_cfg[key]!==false;
+    });
   }
-
-  // Notif
-  const ta=document.getElementById('tg-a-'+idx);if(ta)ta.checked=b.tg_ativo!==false;
-  const gr=document.getElementById('ng-'+idx);if(gr)gr.style.opacity=b.tg_ativo!==false?'1':'0.5';
-  const ts2=document.getElementById('tg-st-'+idx);
-  if(ts2)ts2.textContent=`${(b.exchange||'binance').toUpperCase()} | ${b.tg_token?(b.tg_ativo!==false?'Telegram ativo':'Pausado'):'Sem token Telegram'}`;
-  if(b.notif_cfg)Object.keys(NOTIF).forEach(k=>{const el=document.getElementById(`nf-${idx}-${k}`);if(el)el.checked=b.notif_cfg[k]!==false;});
-}
-
-function renderBotOps(idx,f){
-  const tr=(bots[idx]?.trades||[]);
-  const filtered=f==='all'?tr:tr.filter(t=>f==='win'?t.pnl>=0:t.pnl<0);
-  const tb=document.getElementById('bops-'+idx);if(!tb)return;
-  const name=bots[idx]?.name||'—';
-  if(!filtered.length){tb.innerHTML=`<tr><td colspan="10" class="empty">Nenhuma operação ainda</td></tr>`;return;}
-  tb.innerHTML=[...filtered].reverse().map((t,i)=>{
-    const pct=t.usdt_used>0?(t.pnl/t.usdt_used*100).toFixed(2)+'%':'—';
-    const c=t.pnl>=0?'pp':'pn';
-    return`<tr>
-      <td style="color:var(--dim)">${filtered.length-i}</td>
-      <td><span class="sym-badge">${(t.symbol||'').replace('USDT','').replace('-USDT','')}</span></td>
-      <td>$${fmt(t.entry||0,4)}</td>
-      <td>${t.exit>0?'$'+fmt(t.exit,4):'<span style="color:var(--amber)">em aberto</span>'}</td>
-      <td style="color:var(--muted)">${t.qty||'—'}</td>
-      <td style="color:var(--muted)">$${fmt(t.usdt_used||0)}</td>
-      <td class="${c}">${t.pnl>=0?'+':''}$${(t.pnl||0).toFixed(4)}</td>
-      <td class="${c}">${pct}</td>
-      <td>${rmotivo(t.reason)}</td>
-      <td style="color:var(--dim);font-size:10px">${(t.close||'—').slice(0,16)}</td>
-    </tr>`;
-  }).join('');
-}
-
-function bfilt(idx,f,btn){
-  document.querySelectorAll(`#view-bot${idx} .fb`).forEach(b=>b.classList.remove('on'));
-  btn.classList.add('on');renderBotOps(idx,f);
-}
-
-async function sta(idx){
-  const a=document.getElementById('tg-a-'+idx)?.checked;
-  await fetch('/api/tg_ativo/'+idx,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ativo:a})});
-  const g=document.getElementById('ng-'+idx);if(g)g.style.opacity=a?'1':'0.5';
-}
-async function sn(idx){
-  const cfg={};Object.keys(NOTIF).forEach(k=>{const el=document.getElementById(`nf-${idx}-${k}`);if(el)cfg[k]=el.checked;});
-  await fetch('/api/notif/'+idx,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
-  const m=document.getElementById('sm-'+idx);if(m){m.style.display='block';setTimeout(()=>m.style.display='none',2e3);}
-}
-
-async function sendReport(){
-  const btn=document.getElementById('btn-rep');btn.textContent='Enviando...';btn.disabled=true;
-  try{
-    const r=await fetch('/api/report/send',{method:'POST'});const d=await r.json();
-    const el=document.getElementById('rr');el.style.display='block';el.textContent=d.msg;
-    btn.textContent='✓ Enviado!';
-  }catch(e){btn.textContent='Erro';}
-  setTimeout(()=>{btn.textContent='Enviar agora';btn.disabled=false;},3e3);
-}
-
-async function showReport(){
-  const r=await fetch('/api/report/preview');const d=await r.json();
-  const el=document.getElementById('rr');el.style.display='block';el.textContent=d.text||'Erro';
-}
-
-async function loadWallet(idx){
-  const el=document.getElementById('wallet-'+idx);if(!el)return;
-  try{
-    const d=await fetch('/api/wallet/'+idx).then(r=>r.json());
-    if(d.error||!d.assets?.length){
-      el.innerHTML='<div class="wallet-loading">'+((d.error||d.note)||'Sem saldo disponível')+'</div>';return;
-    }
-    const maxPct=Math.max(...d.assets.map(a=>a.pct),1);
-    const barColors={USDT:'var(--green)',BTC:'#f7931a',ETH:'#627eea',SOL:'#9400ff',BNB:'#f0b90b'};
-    el.innerHTML=`<div class="wallet-total">
-      <div>
-        <div style="font-size:10px;font-weight:600;letter-spacing:.1em;color:var(--muted);text-transform:uppercase;margin-bottom:4px" data-tip="Valor total da carteira desta conta em dólares">TOTAL DA CARTEIRA <span class="hi">?</span></div>
-        <div class="wallet-total-v">$${(d.total_usd||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-        <div class="wallet-sub">${d.assets.length} ativo${d.assets.length!==1?'s':''} · ${d.exchange.toUpperCase()}</div>
-      </div>
-    </div>`+d.assets.map(a=>{
-      const bar=barColors[a.asset]||'var(--muted)';
-      const barW=(a.pct/maxPct*100).toFixed(0);
-      const locked=a.locked?'<span style="font-size:9px;color:var(--amber);margin-left:4px" data-tip="Quantidade bloqueada em ordem aberta">🔒</span>':'';
-      return`<div class="wallet-row" data-tip="${a.asset}: $${a.price.toLocaleString('pt-BR',{minimumFractionDigits:2})} por unidade">
-        <div class="wallet-asset">${a.asset}${locked}</div>
-        <div class="wallet-bar-wrap"><div class="wallet-bar" style="width:${barW}%;background:${bar}"></div></div>
-        <div class="wallet-pct">${a.pct}%</div>
-        <div class="wallet-qty">${a.qty.toFixed(6).replace(/\.?0+$/,'')}</div>
-        <div class="wallet-usd" style="color:${a.asset==='USDT'&&a.usd<10?'var(--red)':'var(--text)'}">$${a.usd.toLocaleString('pt-BR',{minimumFractionDigits:2})}</div>
-      </div>`;}).join('');
-  }catch(e){el.innerHTML='<div class="wallet-loading">Erro ao carregar carteira</div>';}
+  const tgs=document.getElementById(`tg-st-${idx}`);
+  if(tgs){
+    const exch=(d.exchange||'binance').toUpperCase();
+    const tgSt=d.tg_token?(d.tg_ativo!==false?'✓ Telegram ativo':'⏸ Telegram pausado'):'✗ Sem token';
+    tgs.textContent=`${exch} | ${tgSt}`;
+  }
 }
 
 async function refresh(){
   try{
-    const data=await fetch('/api/bots').then(r=>r.json());
-    const nav=document.getElementById('nav');
-    const panels=document.getElementById('panels');
+    const r=await fetch('/api/bots');
+    const data=await r.json();
+    const tabsEl=document.getElementById('tabs');
+    const panelsEl=document.getElementById('panels');
 
-    if(nav.children.length<=1){
+    if(tabsEl.children.length===0&&data.length>0){
       data.forEach((b,i)=>{
-        const ex=(b.exchange||'binance').toLowerCase();
-        const xb=`<span class="xbadge ${ex==='okx'?'xb-okx':'xb-bnb'}">${ex.toUpperCase()}</span>`;
-        const btn=document.createElement('button');
-        btn.className='ntab';btn.id='nb-'+i;
-        btn.onclick=()=>sv('bot'+i,btn);
-        btn.innerHTML=`<div class="nb ${b.bot_running?'on':''}"></div>${b.emoji||'🤖'} ${b.name} ${xb}`;
-        nav.appendChild(btn);
-        const div=document.createElement('div');div.innerHTML=buildBotView(b,i);
-        panels.appendChild(div.firstChild||div);
+        const T=THEMES[i%THEMES.length];
+        const tab=document.createElement('div');
+        tab.className='tab'+(i===0?' on':'');
+        tab.id=`tab-${i}`;
+        const exchLabel = b.exchange==='okx'
+          ? '<span class="badge-testnet" style="background:rgba(255,165,2,.15);color:#ffa502;border-color:rgba(255,165,2,.3)">OKX</span>'
+          : '<span class="badge-testnet" style="background:rgba(240,185,11,.1);color:#f0b90b;border-color:rgba(240,185,11,.3)">BNB</span>';
+        tab.innerHTML=`<div class="dot ${b.bot_running?'on':''}"></div>
+          ${b.emoji||'🤖'} ${b.name} ${exchLabel}
+          ${b.testnet?'<span class="badge-testnet">SIM</span>':''}`;
+        tab.style.setProperty('--accent',T.accent);
+        tab.onclick=()=>{
+          document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
+          document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
+          tab.classList.add('on');
+          document.getElementById(`panel-${i}`).classList.add('on');
+          cur=i; applyTheme(i);
+        };
+        tabsEl.appendChild(tab);
+        const div=document.createElement('div');
+        div.innerHTML=buildPanel(b,i);
+        panelsEl.appendChild(div.firstChild||div);
       });
-
-      // Aba relatório
-      const rbtn=document.createElement('button');rbtn.className='ntab';
-      rbtn.onclick=()=>sv('relatorio',rbtn);rbtn.textContent='📊 Relatório';nav.appendChild(rbtn);
-      const rdiv=document.createElement('div');
-      rdiv.innerHTML=`<div id="view-relatorio" class="view" style="padding:20px;max-width:700px">
-        <div class="rep-card">
-          <div class="rep-title">Relatório Diário</div>
-          <div class="rep-sub">Enviado automaticamente às 22h00 pelo Telegram</div>
-          <button class="rep-btn g" id="btn-rep" onclick="sendReport()">Enviar agora</button>
-          <button class="rep-btn" onclick="showReport()">Pré-visualizar</button>
-          <div class="rep-preview" id="rr"></div>
-        </div>
-        <div class="rep-card">
-          <div class="rep-title">Comandos no Telegram</div>
-          <div class="rep-sub">Envie esses comandos no chat para controlar os bots remotamente</div>
-          <div class="cmd-list">
-            <div class="cmd"><span class="cmd-code">/status</span><span class="cmd-desc">Status completo de todos os bots agora</span></div>
-            <div class="cmd"><span class="cmd-code">/relatorio</span><span class="cmd-desc">Relatório do dia com PnL, operações e win rate</span></div>
-            <div class="cmd"><span class="cmd-code">/saldo</span><span class="cmd-desc">Saldo de USDT disponível em cada conta</span></div>
-            <div class="cmd"><span class="cmd-code">/ops</span><span class="cmd-desc">Últimas 5 operações realizadas</span></div>
-            <div class="cmd"><span class="cmd-code">/scanner</span><span class="cmd-desc">Quais ativos estão sendo monitorados agora</span></div>
-            <div class="cmd"><span class="cmd-code">/pausar N</span><span class="cmd-desc">Para notificações do Bot N (ex: /pausar 1)</span></div>
-            <div class="cmd"><span class="cmd-code">/ativar N</span><span class="cmd-desc">Retoma notificações do Bot N (ex: /ativar 1)</span></div>
-          </div>
-        </div>
-      </div>`;
-      panels.appendChild(rdiv.firstChild||rdiv);
+      setTimeout(()=>{
+        const p=document.getElementById('panel-0');if(p)p.classList.add('on');
+        data.forEach((_,i)=>initChart(`ch-${i}`));
+        applyTheme(0);
+      },100);
     }
 
     data.forEach((b,i)=>{
-      const btn2=document.getElementById('nb-'+i);
-      if(btn2){
-        const ex=(b.exchange||'binance').toLowerCase();
-        const xb=`<span class="xbadge ${ex==='okx'?'xb-okx':'xb-bnb'}">${ex.toUpperCase()}</span>`;
-        btn2.innerHTML=`<div class="nb ${b.bot_running?'on':''}"></div>${b.emoji||'🤖'} ${b.name} ${xb}`;
-      }
-      bots[i]=b;updBotPanel(b,i);if(document.getElementById('wallet-'+i))loadWallet(i);
+      const tab=document.getElementById(`tab-${i}`);
+      if(tab){const d=tab.querySelector('.dot');if(d)d.className='dot '+(b.bot_running?'on':'');}
+      bots[i]=b;
+      if(document.getElementById(`panel-${i}`)) updatePanel(b,i);
     });
-    updOv(data);
 
-    const ao=data.some(b=>b.bot_running);
-    const ld=document.getElementById('live-dot');if(ld)ld.className='dot '+(ao?'on':'');
+    const anyOn=data.some(b=>b.bot_running);
+    const ld=document.getElementById('live-dot');
     const st=document.getElementById('bot-st');
-    if(st)st.textContent=ao?data.filter(b=>b.bot_running).length+' bot(s) ativo(s)':'nenhum bot ativo';
+    if(ld)ld.className='live '+(anyOn?'on':'');
+    if(st)st.textContent=anyOn?data.filter(b=>b.bot_running).length+' bot(s) ativo(s)':'INATIVO';
+
   }catch(e){
-    const st=document.getElementById('bot-st');if(st)st.textContent='erro de conexão';
+    const st=document.getElementById('bot-st');if(st)st.textContent='ERRO DE CONEXÃO';
   }
 }
 
 async function refreshTicker(){
-  for(const sym of ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT']){
+  const pairs=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT'];
+  for(const sym of pairs){
     try{
-      const d=await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol='+sym).then(r=>r.json());
+      const r=await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym}`);
+      const d=await r.json();
       const el=document.getElementById('tick-'+sym);if(!el)continue;
       const p=parseFloat(d.lastPrice),c=parseFloat(d.priceChangePercent);
-      const fp=p>1000?'$'+p.toLocaleString('pt-BR',{minimumFractionDigits:2}):p>10?'$'+p.toFixed(2):'$'+p.toFixed(4);
-      el.querySelector('.ti-price').textContent=fp;
-      const ce=el.querySelector('.ti-chg');ce.textContent=(c>=0?'+':'')+c.toFixed(2)+'%';ce.className='ti-chg '+(c>=0?'up':'dn');
+      const fp=p>1000?'$'+p.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}):p>10?'$'+p.toFixed(2):'$'+p.toFixed(4);
+      el.querySelector('.ti-p').textContent=fp;
+      const ce=el.querySelector('.ti-c');
+      ce.textContent=(c>=0?'+':'')+c.toFixed(2)+'%';
+      ce.className='ti-c '+(c>=0?'up':'dn');
     }catch(e){}
   }
 }
 
-setInterval(()=>{const e=document.getElementById('clk');if(e)e.textContent=new Date().toLocaleTimeString('pt-BR');},1e3);
-refresh();refreshTicker();setInterval(refresh,5e3);setInterval(refreshTicker,1e4);
+setInterval(()=>{const e=document.getElementById('clk');if(e)e.textContent=new Date().toLocaleTimeString('pt-BR');},1000);
+refresh();refreshTicker();
+setInterval(refresh,5000);setInterval(refreshTicker,10000);
 </script>
 </body>
-</html>"""
+</html>'''
 
+
+# ── Parser do log ─────────────────────────────────────────────────────────────
 
 def parse_bot_log(log_file: str, bot_name: str, bot_idx: int = 0) -> dict:
     result = {
-        "name":bot_name,"emoji":"🤖","bot_running":False,
-        "exchange":os.getenv(f"BOT_{bot_idx+1}_EXCHANGE","binance").lower(),
-        "testnet":os.getenv(f"BOT_{bot_idx+1}_TESTNET","false").lower()=="true",
-        "tg_token":bool(os.getenv(f"BOT_{bot_idx+1}_TELEGRAM_TOKEN","")),
-        "tg_ativo":os.getenv(f"BOT_{bot_idx+1}_TELEGRAM_ATIVO","true").lower()=="true",
-        "stop_loss":float(os.getenv(f"BOT_{bot_idx+1}_STOP_LOSS","0.005")),
-        "take_profit":float(os.getenv(f"BOT_{bot_idx+1}_TAKE_PROFIT","0.010")),
-        "active_symbol":None,"price":None,"rsi":None,"trend":None,
-        "macd_signal":None,"bb_pct":None,"usdt":None,
-        "pnl":0.0,"wins":0,"losses":0,
-        "position":None,"trades":[],"scanner":[],"scanner_scores":{},"scan_time":None,"logs":[],
-        "notif_cfg":{k:True for k in ["inicio","compra","venda","stop_loss","take_profit","par_troca","ia_erro","resumo"]},
+        "name": bot_name, "emoji": "🤖", "bot_running": False,
+        "exchange": "binance", "testnet": False, "tg_token": False, "tg_ativo": True,
+        "active_symbol": None, "price": None, "rsi": None,
+        "macd_signal": None, "bb_pct": None, "usdt": None,
+        "pnl": 0.0, "wins": 0, "losses": 0, "stop_loss": 0.005, "take_profit": 0.010,
+        "position": None, "trades": [], "scanner": [],
+        "scanner_scores": {}, "scan_time": None, "logs": [],
+        "notif_cfg": {k: True for k in ["inicio","compra","venda","stop_loss","take_profit","par_troca","ia_erro","resumo"]},
     }
-    prefix = f"BOT_{bot_idx+1}"
-    result["emoji"] = os.getenv(f"{prefix}_EMOJI","🤖")
-    for key in result["notif_cfg"]:
-        val = os.getenv(f"{prefix}_NOTIFY_{key.upper()}")
-        if val is not None: result["notif_cfg"][key] = val.lower()=="true"
 
-    if not os.path.exists(log_file): return result
-    try: lines = open(log_file,encoding='utf-8').readlines()
-    except: return result
+    # Lê config do .env para este bot
+    prefix = f"BOT_{bot_idx+1}"
+    result["emoji"]       = os.getenv(f"{prefix}_EMOJI", "🤖")
+    result["exchange"]    = os.getenv(f"{prefix}_EXCHANGE", "binance").lower()
+    result["testnet"]     = os.getenv(f"{prefix}_TESTNET","false").lower()=="true"
+    result["tg_token"]    = bool(os.getenv(f"{prefix}_TELEGRAM_TOKEN",""))
+    result["tg_ativo"]    = os.getenv(f"{prefix}_TELEGRAM_ATIVO","true").lower()=="true"
+    result["stop_loss"]   = float(os.getenv(f"{prefix}_STOP_LOSS","0.005"))
+    result["take_profit"] = float(os.getenv(f"{prefix}_TAKE_PROFIT","0.010"))
+
+    for key in result["notif_cfg"]:
+        env_key = f"{prefix}_NOTIFY_{key.upper()}"
+        val = os.getenv(env_key)
+        if val is not None:
+            result["notif_cfg"][key] = val.lower() == "true"
+
+    if not os.path.exists(log_file):
+        return result
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except:
+        return result
 
     result["logs"] = [l.rstrip() for l in lines[-100:]]
     if lines:
         try:
-            last_dt = datetime.strptime(lines[-1][:19],"%Y-%m-%d %H:%M:%S")
-            result["bot_running"] = (datetime.now()-last_dt).total_seconds()<300
+            last_dt = datetime.strptime(lines[-1][:19], "%Y-%m-%d %H:%M:%S")
+            result["bot_running"] = (datetime.now() - last_dt).total_seconds() < 300
         except: pass
 
-    re_price  = re.compile(r'\[([\w-]+)\] \$([\d,.]+) \| RSI:([\d.]+) \| Tend:(\w+) \| MACD:(\w+) \| BB:([-\d.]+)% \| USDT:([\d.]+)')
-    re_wl     = re.compile(r'W:(\d+) L:(\d+)')
-    re_pnl    = re.compile(r'Total: \$([-+]?[\d.]+)')
-    re_close  = re.compile(r'Fechado ([\w-]+) \(([^)]+)\).*PnL: \$([-+]?[\d.]+)')
-    re_open   = re.compile(r'Comprado ([\d.]+) ([\w-]+) @ \$([\d,.]+) \(\$([\d,.]+)\)')
-    re_scan   = re.compile(r'[★ ] ([\w-]+)\s+\| Score:\s*([\d.]+) \| Vol:\s*([\d.]+)M \| Var:([-+\d.]+)% \| Volat:([\d.]+)%')
-    re_best   = re.compile(r'Melhor: ([\w-]+)')
+    # Regex compatível com Binance (BTCUSDT) e OKX (BTC-USDT)
+    re_price = re.compile(r'\[([\w-]+)\] \$([\d,.]+) \| RSI:([\d.]+) \| Tend:(\w+) \| MACD:(\w+) \| BB:([-\d.]+)% \| USDT:([\d.]+)')
+    re_wl    = re.compile(r'W:(\d+) L:(\d+)')
+    re_pnl   = re.compile(r'Total: \$([-+]?[\d.]+)')
+    re_close = re.compile(r'Fechado ([\w-]+) \(([^)]+)\).*PnL: \$([-+]?[\d.]+)')
+    re_open  = re.compile(r'Comprado ([\d.]+) ([\w-]+) @ \$([\d,.]+) \(\$([\d,.]+)\)')
+    re_scan  = re.compile(r'[★ ] ([\w-]+)\s+\| Score:\s*([\d.]+) \| Vol:\s*([\d.]+)M \| Var:([-+\d.]+)% \| Volat:([\d.]+)%')
+    re_best  = re.compile(r'Melhor: ([\w-]+)|Melhor par selecionado: ([\w-]+)')
     re_scan_t = re.compile(r'── Scanner')
 
-    ce=cs=cq=cu=None; scanner_tmp=[]; scan_active=False
+    current_entry = current_sym = current_qty = current_usdt = None
+    scanner_tmp = []; scan_active = False
 
     for line in lines:
         m = re_price.search(line)
         if m:
-            result["active_symbol"]=m.group(1); result["price"]=float(m.group(2).replace(",",""))
-            result["rsi"]=float(m.group(3)); result["trend"]=m.group(4)
-            result["macd_signal"]=m.group(5); result["bb_pct"]=float(m.group(6)); result["usdt"]=float(m.group(7))
+            result["active_symbol"] = m.group(1); result["price"] = float(m.group(2).replace(",",""))
+            result["rsi"] = float(m.group(3)); result["macd_signal"] = m.group(5)
+            result["bb_pct"] = float(m.group(6)); result["usdt"] = float(m.group(7))
+
         m = re_wl.search(line)
         if m: result["wins"]=int(m.group(1)); result["losses"]=int(m.group(2))
+
         m = re_pnl.search(line)
-        if m: result["pnl"]=float(m.group(1))
-        if re_scan_t.search(line): scan_active=True; scanner_tmp=[]; result["scan_time"]=line[:19]
+        if m: result["pnl"] = float(m.group(1))
+
+        if re_scan_t.search(line):
+            scan_active=True; scanner_tmp=[]; result["scan_time"]=line[:19]
         if scan_active:
             m = re_scan.search(line)
             if m:
-                scanner_tmp.append({"symbol":m.group(1),"score":float(m.group(2)),"volume":m.group(3),
-                    "change":float(m.group(4)),"volatility":m.group(5),"in_wallet":False})
+                scanner_tmp.append({"symbol":m.group(1),"score":float(m.group(2)),
+                    "volume":m.group(3),"change":float(m.group(4)),"volatility":m.group(5)})
                 result["scanner_scores"][m.group(1)]=float(m.group(2))
+
         m = re_best.search(line)
         if m:
-            result["active_symbol"]=m.group(1)
-            if scanner_tmp: result["scanner"]=sorted(scanner_tmp,key=lambda x:x["score"],reverse=True)
+            result["active_symbol"] = m.group(1) or m.group(2)
+            if scanner_tmp: result["scanner"] = sorted(scanner_tmp,key=lambda x:x["score"],reverse=True)
             scan_active=False
+
         m = re_open.search(line)
-        if m: cq=m.group(1); cs=m.group(2); ce=float(m.group(3).replace(",","")); cu=float(m.group(4).replace(",",""))
+        if m:
+            current_qty=m.group(1); current_sym=m.group(2)
+            current_entry=float(m.group(3).replace(",","")); current_usdt=float(m.group(4).replace(",",""))
+
         m = re_close.search(line)
         if m:
-            result["trades"].append({"symbol":m.group(1),"entry":ce or 0,"exit":0,
-                "pnl":float(m.group(3)),"qty":cq or "—","usdt_used":cu or 0,"close":line[:19],"reason":m.group(2)})
-            ce=cs=cq=cu=None
+            result["trades"].append({
+                "symbol":m.group(1),"side":"BUY","entry":current_entry or 0,
+                "exit":0,"pnl":float(m.group(3)),"qty":current_qty or "—",
+                "usdt_used":current_usdt or 0,"close":line[:19],"reason":m.group(2),
+            })
+            current_entry=current_sym=current_qty=current_usdt=None
 
     result["total_trades"] = len(result["trades"])
-    if ce and cs: result["position"] = {"symbol":cs,"entry_price":ce,"qty":cq or "—","usdt_used":cu or 0}
+    if current_entry and current_sym:
+        result["position"] = {"symbol":current_sym,"entry_price":current_entry,
+                               "qty":current_qty or "—","usdt_used":current_usdt or 0}
     if result["trades"] and result["pnl"]==0.0:
         result["pnl"]=round(sum(t["pnl"] for t in result["trades"]),4)
         result["wins"]=sum(1 for t in result["trades"] if t["pnl"]>=0)
@@ -1013,344 +789,271 @@ def parse_bot_log(log_file: str, bot_name: str, bot_idx: int = 0) -> dict:
 
 
 def get_all_bots(bot_filter: int = 0):
+    """Retorna todos os bots ou apenas um se bot_filter > 0."""
     bots = []
     bot_count = int(os.getenv("BOT_COUNT","1"))
-    indices = [bot_filter-1] if bot_filter>0 else range(bot_count)
+    indices = [bot_filter - 1] if bot_filter > 0 else range(bot_count)
     for i in indices:
         prefix = f"BOT_{i+1}"
-        name   = os.getenv(f"{prefix}_NAME",f"Bot {i+1}")
+        name   = os.getenv(f"{prefix}_NAME", f"Bot {i+1}")
         slug   = name.lower().replace(" ","_")
         candidatos = [
-            os.path.join(BASE,f"bot_bot_{slug}.log"),
-            os.path.join(BASE,f"bot_{slug}.log"),
-            os.path.join(BASE,"bot.log"),
+            os.path.join(BASE, f"bot_bot_{slug}.log"),  # nome gerado pelo bot (bot_ + slug)
+            os.path.join(BASE, f"bot_{slug}.log"),
+            os.path.join(BASE, f"bot.log"),
+            os.path.join(BASE, f"{slug}.log"),
         ]
-        for f in sorted(glob.glob(os.path.join(BASE,"*.log"))):
+        for f in sorted(glob.glob(os.path.join(BASE, "*.log"))):
             if slug in os.path.basename(f).lower() and f not in candidatos:
-                candidatos.insert(0,f)
-        log_file = next((f for f in candidatos if os.path.exists(f)),candidatos[-1])
-        bots.append(parse_bot_log(log_file,name,i))
-    if not bots: bots.append(parse_bot_log(os.path.join(BASE,"bot.log"),"Principal",0))
+                candidatos.insert(0, f)
+        log_file = next((f for f in candidatos if os.path.exists(f)), candidatos[-1])
+        bots.append(parse_bot_log(log_file, name, i))
+    if not bots:
+        bots.append(parse_bot_log(os.path.join(BASE,"bot.log"),"Principal",0))
     return bots
 
 
-# ── Relatório e Telegram ──────────────────────────────────────────────────────
+# ── Autenticação ──────────────────────────────────────────────────────────────
 
-def gerar_relatorio(bots: list, tipo: str = "diario") -> str:
-    hoje  = date.today().strftime("%d/%m/%Y")
-    hora  = datetime.now().strftime("%H:%M")
-    tp    = sum(b["pnl"] for b in bots)
-    tops  = sum(len(b["trades"]) for b in bots)
-    tw    = sum(b["wins"] for b in bots)
-    tl    = sum(b["losses"] for b in bots)
-    tot   = tw + tl
-    wr    = f"{round(tw/tot*100)}%" if tot>0 else "—"
-    at    = sum(1 for b in bots if b["bot_running"])
-    ab    = sum(1 for b in bots if b.get("position"))
-    ep    = "🟢" if tp>=0 else "🔴"
-    titulo = "📊 *RELATÓRIO DIÁRIO — ScalpBot*" if tipo=="diario" else "📈 *STATUS — ScalpBot*"
-    lines = [titulo, f"📅 {hoje} às {hora}","",
-        "━━━━━━━━━━━━━━━━━━━━","*RESUMO GERAL*",
-        f"{ep} PnL Total: `{'+'if tp>=0 else ''}${tp:.4f}`",
-        f"🤖 Bots ativos: `{at}/{len(bots)}`",
-        f"📋 Operações: `{tops}` ({tw}W / {tl}L)",
-        f"🎯 Win Rate: `{wr}`",
-        f"📌 Posições abertas: `{ab}`","",
-        "━━━━━━━━━━━━━━━━━━━━"]
-    for b in bots:
-        exch = b.get("exchange","binance").upper()
-        pnl  = b["pnl"]; ep2="🟢" if pnl>=0 else "🔴"
-        t2   = (b["wins"]or 0)+(b["losses"]or 0)
-        wr2  = f"{round(b['wins']/t2*100)}%" if t2>0 else "—"
-        usdt = b.get("usdt") or 0
-        st   = "✅ ATIVO" if b["bot_running"] else "⛔ INATIVO"
-        lines += [f"*{b['emoji']} {b['name']}* ({exch})",f"Status: {st}",
-            f"{ep2} PnL: `{'+'if pnl>=0 else ''}${pnl:.4f}`",
-            f"💵 USDT: `${usdt:.2f}`",f"📊 Ops: `{t2}` | WR: `{wr2}`"]
-        if b.get("position"):
-            pos=b["position"]; lines.append(f"📌 Posição: `{pos['symbol']}` @ ${pos['entry_price']:.4f}")
-        if b.get("active_symbol"): lines.append(f"🔍 Monitorando: `{b['active_symbol']}`")
-        lines.append("")
-    lines += ["━━━━━━━━━━━━━━━━━━━━",
-        "💡 Comandos: /status /saldo /ops /scanner",
-        "_ScalpBot Multi-Exchange v3.0_"]
-    return "\n".join(lines)
+from functools import wraps
 
-
-def send_tg_all(msg: str):
-    try:
-        import requests as rq
-    except ImportError:
-        import urllib.request as rq
-        return []
-    enviados = []
-    bc = int(os.getenv("BOT_COUNT","1"))
-    for i in range(1, bc+1):
-        token = os.getenv(f"BOT_{i}_TELEGRAM_TOKEN","").strip()
-        chat  = os.getenv(f"BOT_{i}_TELEGRAM_CHAT","").strip()
-        if not token or not chat: continue
-        try:
-            r = rq.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id":chat,"text":msg,"parse_mode":"Markdown"},timeout=10,proxies={})
-            if r.json().get("ok"): enviados.append(f"BOT_{i}")
-        except Exception as e: print(f"[TG] Erro BOT_{i}: {e}")
-    return enviados
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ScalpBot — Acesso</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0b0f1a;color:#e8edf5;font-family:'IBM Plex Sans',system-ui,sans-serif;
+  display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{background:#111827;border:1px solid #1e2d45;border-radius:12px;
+  padding:40px 36px;width:100%;max-width:340px}
+.brand{font-family:monospace;font-size:18px;font-weight:700;color:#3b82f6;
+  letter-spacing:.12em;text-align:center;margin-bottom:6px}
+.sub{text-align:center;font-size:11px;color:#5a7299;margin-bottom:32px;font-family:monospace}
+label{display:block;font-size:10px;font-weight:700;letter-spacing:.12em;color:#5a7299;
+  text-transform:uppercase;margin-bottom:7px}
+input{width:100%;padding:11px 14px;background:#0d1829;border:1px solid #1e2d45;
+  border-radius:8px;color:#e8edf5;font-size:15px;font-family:monospace;outline:none;transition:border .2s}
+input:focus{border-color:#3b82f6}
+.btn{width:100%;margin-top:18px;padding:12px;border-radius:8px;border:none;
+  background:#3b82f6;color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s}
+.btn:hover{background:#2563eb}
+.err{margin-top:14px;padding:10px 14px;background:rgba(239,68,68,.1);
+  border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:12px;
+  color:#f87171;text-align:center;display:none}
+.err.on{display:block}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="brand">SCALPBOT</div>
+  <div class="sub">Painel restrito — autenticação necessária</div>
+  <form method="POST" action="/login" autocomplete="off">
+    <label>Senha de acesso</label>
+    <input type="password" name="pw" placeholder="••••••••" autofocus>
+    <button class="btn" type="submit">Entrar</button>
+    <div class="err {EC}">{EM}</div>
+  </form>
+</div>
+</body>
+</html>"""
 
 
-def proc_cmd(text: str) -> str:
-    cmd = text.strip().lower().split()[0] if text.strip() else ""
+def _sec_headers(resp):
+    """Aplica headers de segurança — impede cache, debug e embedding."""
+    resp.headers["X-Content-Type-Options"]  = "nosniff"
+    resp.headers["X-Frame-Options"]         = "DENY"
+    resp.headers["X-XSS-Protection"]        = "1; mode=block"
+    resp.headers["Cache-Control"]           = "no-store, no-cache, must-revalidate, private"
+    resp.headers["Pragma"]                  = "no-cache"
+    resp.headers["Expires"]                 = "0"
+    resp.headers["Referrer-Policy"]         = "no-referrer"
+    resp.headers["Permissions-Policy"]      = "geolocation=(), microphone=(), camera=()"
+    # Remove header que revela tecnologia
+    resp.headers.pop("Server", None)
+    return resp
+
+
+def autenticado():
+    return session.get("ok") is True
+
+
+def requer_auth(f):
+    """Decorator: redireciona para /login se não autenticado."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not autenticado():
+            # APIs retornam 401 em vez de redirecionar
+            if request.path.startswith("/api/"):
+                return jsonify({"erro": "Não autorizado"}), 401
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return wrapper
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    ec = em = ""
+    if request.method == "POST":
+        senha_env    = os.getenv("DASHBOARD_PASSWORD", "scalpbot2026").strip()
+        senha_digita = request.form.get("pw", "")
+        if senha_digita and senha_digita == senha_env:
+            session.clear()
+            session["ok"]       = True
+            session.permanent   = False          # expira ao fechar o browser
+            resp = make_response(redirect(url_for("index")))
+            return _sec_headers(resp)
+        ec = "on"
+        em = "Senha incorreta." if senha_digita else "Digite a senha."
+    html = LOGIN_HTML.replace("{EC}", ec).replace("{EM}", em)
+    resp = make_response(html)
+    return _sec_headers(resp)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    resp = make_response(redirect(url_for("login")))
+    return _sec_headers(resp)
+
+
+# ── Rotas protegidas ──────────────────────────────────────────────────────────
+
+@app.route("/")
+@requer_auth
+def index():
+    resp = make_response(render_template_string(HTML))
+    return _sec_headers(resp)
+
+
+@app.route("/api/bots")
+@requer_auth
+def api_bots():
+    resp = make_response(jsonify(get_all_bots(app.config.get("BOT_FILTER", 0))))
+    return _sec_headers(resp)
+
+
+@app.route("/api/status")
+@requer_auth
+def api_status():
+    bots = get_all_bots(app.config.get("BOT_FILTER", 0))
+    resp = make_response(jsonify(bots[0] if bots else {}))
+    return _sec_headers(resp)
+
+
+@app.route("/api/report/preview")
+@requer_auth
+def report_preview():
     bots = get_all_bots()
-    if cmd in ("/status","/start"): return gerar_relatorio(bots,"status")
-    if cmd == "/relatorio": return gerar_relatorio(bots,"diario")
-    if cmd == "/saldo":
-        lines=["💵 *SALDO DAS CONTAS*\n"]
-        for b in bots:
-            usdt=b.get("usdt") or 0; exch=b.get("exchange","binance").upper()
-            lines.append(f"{b['emoji']} *{b['name']}* ({exch})\n  USDT: `${usdt:.2f}`\n")
-        return "\n".join(lines)
-    if cmd == "/ops":
-        lines=["📋 *ÚLTIMAS OPERAÇÕES*\n"]; all_ops=[]
-        for b in bots:
-            for t in b.get("trades",[]): all_ops.append({**t,"_bot":b["name"]})
-        all_ops.sort(key=lambda x:x.get("close",""),reverse=True)
-        for op in all_ops[:5]:
-            ep="✅" if op.get("pnl",0)>=0 else "❌"
-            lines.append(f"{ep} {op['_bot']} | {op.get('symbol','?')} | `${op.get('pnl',0):.4f}`")
-        if not all_ops: lines.append("Nenhuma operação ainda.")
-        return "\n".join(lines)
-    if cmd == "/scanner":
-        lines=["🔍 *SCANNER DE MERCADO*\n"]
-        for b in bots:
-            if b.get("scanner"):
-                lines.append(f"*{b['name']}*")
-                for s in b["scanner"][:3]:
-                    star="★" if s["symbol"]==b.get("active_symbol") else " "
-                    lines.append(f"{star} `{s['symbol']}` Score:{s['score']} Vol:{s['volume']}M")
-                lines.append("")
-        if not any(b.get("scanner") for b in bots): lines.append("Sem dados ainda.")
-        return "\n".join(lines)
-    if cmd.startswith("/pausar"):
-        parts=text.strip().split()
-        if len(parts)>1 and parts[1].isdigit():
-            idx=int(parts[1]); set_key(ENV,f"BOT_{idx}_TELEGRAM_ATIVO","false")
-            load_dotenv(dotenv_path=ENV,override=True)
-            return f"⏸ Notificações do Bot {idx} pausadas."
-        return "Uso: /pausar N (ex: /pausar 1)"
-    if cmd.startswith("/ativar"):
-        parts=text.strip().split()
-        if len(parts)>1 and parts[1].isdigit():
-            idx=int(parts[1]); set_key(ENV,f"BOT_{idx}_TELEGRAM_ATIVO","true")
-            load_dotenv(dotenv_path=ENV,override=True)
-            return f"✅ Notificações do Bot {idx} ativadas."
-        return "Uso: /ativar N (ex: /ativar 1)"
-    return "❓ Comando não reconhecido. Use:\n/status /relatorio /saldo /ops /scanner /pausar N /ativar N"
+    resp = make_response(jsonify({"text": gerar_relatorio(bots, "diario")}))
+    return _sec_headers(resp)
 
 
-# ── Agendador relatório às 22h ────────────────────────────────────────────────
-
-def _scheduler():
-    while True:
-        agora = datetime.now()
-        if agora.hour == 22 and agora.minute == 0:
-            print("[SCHEDULER] Enviando relatório diário 22h...")
-            bots = get_all_bots()
-            msg  = gerar_relatorio(bots,"diario")
-            env  = send_tg_all(msg)
-            print(f"[SCHEDULER] Enviado para: {env}")
-            time.sleep(61)
-        time.sleep(30)
-
-threading.Thread(target=_scheduler,daemon=True,name="scheduler").start()
+@app.route("/api/report/send", methods=["POST"])
+@requer_auth
+def report_send():
+    bots = get_all_bots()
+    msg  = gerar_relatorio(bots, "diario")
+    env  = send_tg_all(msg)
+    resp = make_response(jsonify({
+        "ok":  bool(env),
+        "msg": f"Enviado para: {', '.join(env)}" if env else "Nenhum bot configurado com Telegram"
+    }))
+    return _sec_headers(resp)
 
 
-# ── Polling Telegram ──────────────────────────────────────────────────────────
-
-def _tg_poller():
+@app.route("/api/notif/<int:idx>", methods=["POST"])
+@requer_auth
+def save_notif(idx):
     try:
-        import requests as rq
-    except ImportError:
-        return
-    offset = 0
-    while True:
-        try:
-            bc = int(os.getenv("BOT_COUNT","1"))
-            for i in range(1, bc+1):
-                token = os.getenv(f"BOT_{i}_TELEGRAM_TOKEN","").strip()
-                if not token: continue
-                r = rq.get(f"https://api.telegram.org/bot{token}/getUpdates",
-                    params={"offset":offset,"timeout":5,"limit":5},timeout=10,proxies={})
-                updates = r.json().get("result",[])
-                for u in updates:
-                    offset = max(offset, u["update_id"]+1)
-                    msg    = u.get("message",{})
-                    text   = msg.get("text","")
-                    chat_id= str(msg.get("chat",{}).get("id",""))
-                    if text.startswith("/"):
-                        resp = proc_cmd(text)
-                        rq.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                            json={"chat_id":chat_id,"text":resp,"parse_mode":"Markdown"},
-                            timeout=10,proxies={})
-        except: pass
-        time.sleep(3)
-
-threading.Thread(target=_tg_poller,daemon=True,name="tg-poller").start()
+        cfg    = request.get_json()
+        prefix = f"BOT_{idx+1}"
+        for key, val in cfg.items():
+            set_key(ENV, f"{prefix}_NOTIFY_{key.upper()}", "true" if val else "false")
+        load_dotenv(dotenv_path=ENV, override=True)
+        resp = make_response(jsonify({"ok": True}))
+        return _sec_headers(resp)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
 
-# ── Rotas Flask ───────────────────────────────────────────────────────────────
+@app.route("/api/tg_ativo/<int:idx>", methods=["POST"])
+@requer_auth
+def save_tg_ativo(idx):
+    try:
+        cfg    = request.get_json()
+        prefix = f"BOT_{idx+1}"
+        set_key(ENV, f"{prefix}_TELEGRAM_ATIVO", "true" if cfg.get("ativo") else "false")
+        load_dotenv(dotenv_path=ENV, override=True)
+        resp = make_response(jsonify({"ok": True}))
+        return _sec_headers(resp)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
 
 @app.route("/api/wallet/<int:bot_idx>")
+@requer_auth
 def api_wallet(bot_idx):
-    """Retorna carteira estimada baseada nos logs do bot + preços públicos sem Tor."""
     try:
         import requests as rq
         bots = get_all_bots()
         if bot_idx >= len(bots):
-            return jsonify({"assets":[],"total_usd":0,"error":"Bot não encontrado"})
-        
-        b = bots[bot_idx]
-        exchange = b.get("exchange","binance")
-        
-        # Coleta ativos conhecidos via log
+            return jsonify({"assets": [], "total_usd": 0})
+        b        = bots[bot_idx]
+        exchange = b.get("exchange", "binance")
         assets_qty = {}
-        
-        # USDT livre (lido do log)
         usdt = b.get("usdt") or 0
-        if usdt > 0:
-            assets_qty["USDT"] = usdt
-        
-        # Posição aberta atual
+        if usdt > 0: assets_qty["USDT"] = usdt
         pos = b.get("position")
         if pos:
-            sym = pos.get("symbol","")
-            qty = float(pos.get("qty") or 0)
-            asset = sym.replace("USDT","").replace("-USDT","")
+            sym   = pos.get("symbol", "")
+            qty   = float(pos.get("qty") or 0)
+            asset = sym.replace("USDT", "").replace("-USDT", "")
             if asset and qty > 0:
-                assets_qty[asset] = assets_qty.get(asset,0) + qty
-        
-        # Operações abertas ainda não fechadas (compras sem venda)
-        trades = b.get("trades",[])
-        
-        # Detectar pares da carteira via log (BOT_HL)
-        wallet_pairs = {}
-        prefix = f"BOT_{bot_idx+1}"
-        log_file_candidates = [
-            os.path.join(BASE, f"bot_bot_{b['name'].lower().replace(' ','_')}.log"),
-            os.path.join(BASE, f"bot_{b['name'].lower().replace(' ','_')}.log"),
-        ]
-        log_file = next((f for f in log_file_candidates if os.path.exists(f)), None)
-        if log_file:
-            try:
-                import re as re2
-                re_cart = re2.compile(r'\[CARTEIRA\] Par detectado: ([\w-]+?)(?:-USDT|USDT)? \(saldo: ([\d.]+)\)')
-                for line in open(log_file, encoding='utf-8').readlines()[-500:]:
-                    m = re_cart.search(line)
-                    if m:
-                        wallet_pairs[m.group(1)] = float(m.group(2))
-            except: pass
-        
-        # Adiciona ativos da carteira detectados
-        for asset, qty in wallet_pairs.items():
-            if qty > 0.0001:
-                assets_qty[asset] = max(assets_qty.get(asset,0), qty)
-        
-        if not assets_qty:
-            return jsonify({"exchange":exchange,"assets":[],"total_usd":0,
-                "note":"Sem saldos detectados. Os saldos são lidos dos logs do bot."})
-        
-        # Busca preços via Binance pública (sem proxy, sem auth)
-        prices = {"USDT":1.0,"BUSD":1.0,"USDC":1.0,"BRL":0.18}
+                assets_qty[asset] = assets_qty.get(asset, 0) + qty
+        prices = {"USDT": 1.0, "BUSD": 1.0, "BRL": 0.195}
         try:
             r = rq.get("https://api.binance.com/api/v3/ticker/price", timeout=8)
             if r.status_code == 200:
                 for t in r.json():
                     if t["symbol"].endswith("USDT"):
-                        prices[t["symbol"].replace("USDT","")] = float(t["price"])
-        except:
-            # Fallback: tenta via proxy Tor
-            try:
-                proxies = {"http":"socks5h://127.0.0.1:9050","https":"socks5h://127.0.0.1:9050"}
-                r = rq.get("https://api.binance.com/api/v3/ticker/price", timeout=8, proxies=proxies)
-                if r.status_code == 200:
-                    for t in r.json():
-                        if t["symbol"].endswith("USDT"):
-                            prices[t["symbol"].replace("USDT","")] = float(t["price"])
-            except: pass
-        
-        # Monta lista de assets
+                        prices[t["symbol"].replace("USDT", "")] = float(t["price"])
+        except: pass
         assets = []
         for asset, qty in assets_qty.items():
             price = prices.get(asset, 0)
             usd   = round(qty * price, 2)
-            if usd >= 0.01 or asset == "USDT":
-                assets.append({
-                    "asset": asset,
-                    "qty":   round(qty, 8),
-                    "price": round(price, 6),
-                    "usd":   usd,
-                    "locked": pos is not None and asset == (pos.get("symbol","").replace("USDT","").replace("-USDT","")),
-                })
-        
+            if usd >= 0.01:
+                assets.append({"asset": asset, "qty": round(qty, 8),
+                    "price": round(price, 6), "usd": usd,
+                    "locked": pos is not None and asset == (pos.get("symbol","").replace("USDT","").replace("-USDT",""))})
         assets.sort(key=lambda x: x["usd"], reverse=True)
-        total_usd = sum(a["usd"] for a in assets)
+        total = sum(a["usd"] for a in assets)
         for a in assets:
-            a["pct"] = round(a["usd"]/total_usd*100, 1) if total_usd > 0 else 0
-        
-        # Monta nota explicativa correta
-        exchange_name = "Binance" if exchange == "binance" else "OKX"
-        note = f"Saldos de {exchange_name} lidos via logs do bot"
-        
-        return jsonify({
-            "exchange":  exchange,
-            "assets":    assets,
-            "total_usd": round(total_usd, 2),
-            "note":      note
-        })
+            a["pct"] = round(a["usd"] / total * 100, 1) if total > 0 else 0
+        resp = make_response(jsonify({"exchange": exchange, "assets": assets, "total_usd": round(total, 2)}))
+        return _sec_headers(resp)
     except Exception as e:
-        return jsonify({"error":str(e),"assets":[],"total_usd":0})
+        return jsonify({"error": str(e), "assets": [], "total_usd": 0})
 
 
-@app.route("/")
-def index(): return render_template_string(HTML)
+# ── Startup ───────────────────────────────────────────────────────────────────
 
-@app.route("/api/bots")
-def api_bots(): return jsonify(get_all_bots(app.config.get("BOT_FILTER",0)))
-
-@app.route("/api/status")
-def api_status():
-    bots=get_all_bots(app.config.get("BOT_FILTER",0))
-    return jsonify(bots[0] if bots else {})
-
-@app.route("/api/report/preview")
-def report_preview():
-    bots=get_all_bots(); return jsonify({"text":gerar_relatorio(bots,"diario")})
-
-@app.route("/api/report/send", methods=["POST"])
-def report_send():
-    bots=get_all_bots(); msg=gerar_relatorio(bots,"diario"); env=send_tg_all(msg)
-    return jsonify({"ok":bool(env),"msg":f"✓ Enviado para: {', '.join(env) if env else 'nenhum bot configurado'}"})
-
-@app.route("/api/notif/<int:idx>", methods=["POST"])
-def save_notif(idx):
-    try:
-        cfg=request.get_json(); prefix=f"BOT_{idx+1}"
-        for key,val in cfg.items(): set_key(ENV,f"{prefix}_NOTIFY_{key.upper()}","true" if val else "false")
-        load_dotenv(dotenv_path=ENV,override=True); return jsonify({"ok":True})
-    except Exception as e: return jsonify({"ok":False,"msg":str(e)}),500
-
-@app.route("/api/tg_ativo/<int:idx>", methods=["POST"])
-def save_tg_ativo(idx):
-    try:
-        cfg=request.get_json(); prefix=f"BOT_{idx+1}"
-        set_key(ENV,f"{prefix}_TELEGRAM_ATIVO","true" if cfg.get("ativo") else "false")
-        load_dotenv(dotenv_path=ENV,override=True); return jsonify({"ok":True})
-    except Exception as e: return jsonify({"ok":False,"msg":str(e)}),500
-
-if __name__=="__main__":
+if __name__ == "__main__":
     import argparse
-    parser=argparse.ArgumentParser()
-    parser.add_argument("--port",type=int,default=5000)
-    parser.add_argument("--bot",type=int,default=0)
-    args=parser.parse_args()
-    app.config["BOT_FILTER"]=args.bot
-    print(f" ScalpBot Dashboard Unificado v3.0 — http://localhost:{args.port}")
-    app.run(host="0.0.0.0",port=args.port,debug=False)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument("--bot",  type=int, default=0)
+    args = parser.parse_args()
+    app.config["BOT_FILTER"] = args.bot
+
+    senha = os.getenv("DASHBOARD_PASSWORD", "scalpbot2026")
+    print("=" * 50)
+    print(f" ScalpBot Dashboard v3.1 — autenticado")
+    print(f" Acesse: http://localhost:{args.port}")
+    print(f" Senha:  {'*' * len(senha)} ({len(senha)} chars)")
+    print("=" * 50)
+    app.run(host="0.0.0.0", port=args.port, debug=False)
